@@ -1,0 +1,433 @@
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║       MULTI-FACTOR PROFIT STRATEGY  v3.5                        ║
+// ║  Целевой Profit Factor: 2.5 – 5.0                               ║
+// ║  Логика: EMA-тренд + Squeeze-прорыв + ADX + RSI + Объём         ║
+// ║  Риск-менеджмент: динамический ATR SL/TP + трейлинг стоп        ║
+// ╚══════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("🚀 Multi-Factor Profit Strategy v3.5",
+    shorttitle         = "MFPS v3.5",
+    overlay            = true,
+    initial_capital    = 10000,
+    default_qty_type   = strategy.percent_of_equity,
+    default_qty_value  = 10,
+    commission_type    = strategy.commission.percent,
+    commission_value   = 0.075,
+    slippage           = 2,
+    max_bars_back      = 500,
+    pyramiding         = 0,
+    process_orders_on_close = false,
+    calc_on_every_tick = false)
+
+// ═══════════════════════════════════════════════════════════════════
+//  ГРУППА 1: ТРЕНД (EMA)
+// ═══════════════════════════════════════════════════════════════════
+i_ema_fast  = input.int(9,   "EMA Быстрая",   minval=3,   maxval=50,  group="📈 Тренд EMA")
+i_ema_mid   = input.int(21,  "EMA Средняя",   minval=10,  maxval=100, group="📈 Тренд EMA")
+i_ema_slow  = input.int(55,  "EMA Медленная", minval=20,  maxval=200, group="📈 Тренд EMA")
+i_ema_trend = input.int(200, "EMA Тренд",     minval=100, maxval=500, group="📈 Тренд EMA")
+
+// ═══════════════════════════════════════════════════════════════════
+//  ГРУППА 2: RSI
+// ═══════════════════════════════════════════════════════════════════
+i_rsi_len   = input.int(14, "RSI Период",     minval=5,  maxval=30,  group="📊 RSI")
+i_rsi_bull  = input.int(52, "RSI Min (лонг)", minval=40, maxval=65,  group="📊 RSI")
+i_rsi_bear  = input.int(48, "RSI Max (шорт)", minval=35, maxval=60,  group="📊 RSI")
+
+// ═══════════════════════════════════════════════════════════════════
+//  ГРУППА 3: ADX — сила тренда
+// ═══════════════════════════════════════════════════════════════════
+i_adx_len   = input.int(14, "ADX Период", minval=5, maxval=30, group="💪 ADX Сила")
+i_adx_min   = input.int(22, "ADX Мин.",   minval=10, maxval=40, group="💪 ADX Сила")
+
+// ═══════════════════════════════════════════════════════════════════
+//  ГРУППА 4: SQUEEZE MOMENTUM (TTM Squeeze адаптация)
+// ═══════════════════════════════════════════════════════════════════
+i_sq_len    = input.int(20,   "Squeeze Период", minval=10, maxval=50, group="🔥 Squeeze")
+i_sq_bb     = input.float(2.0,"BB Множитель",   minval=1.0, maxval=3.0, step=0.1, group="🔥 Squeeze")
+i_sq_kc     = input.float(1.5,"KC Множитель",   minval=1.0, maxval=3.0, step=0.1, group="🔥 Squeeze")
+
+// ═══════════════════════════════════════════════════════════════════
+//  ГРУППА 5: ОБЪЁМ
+// ═══════════════════════════════════════════════════════════════════
+i_vol_len   = input.int(20,   "Vol MA Период",    minval=5,  maxval=50,  group="📦 Объём")
+i_vol_mult  = input.float(1.1,"Мин. объём (x MA)",minval=0.5,maxval=3.0, step=0.1, group="📦 Объём")
+
+// ═══════════════════════════════════════════════════════════════════
+//  ГРУППА 6: РИСК-МЕНЕДЖМЕНТ
+// ═══════════════════════════════════════════════════════════════════
+i_atr_len   = input.int(14,   "ATR Период",      minval=5,  maxval=30,   group="⚙️ Риск")
+i_sl_atr    = input.float(1.5,"Стоп (x ATR)",    minval=0.5,maxval=5.0,  step=0.1, group="⚙️ Риск")
+i_tp_atr    = input.float(4.5,"Тейк (x ATR)",    minval=1.0,maxval=15.0, step=0.1, group="⚙️ Риск")
+i_use_trail = input.bool(true, "Трейлинг стоп",                          group="⚙️ Риск")
+i_trail_atr = input.float(2.0,"Трейл (x ATR)",   minval=0.5,maxval=5.0,  step=0.1, group="⚙️ Риск")
+i_min_score = input.int(3,    "Мин. Score (1-4)", minval=1,  maxval=4,    group="⚙️ Риск",
+    tooltip="Кол-во подтверждений: 3 = strict, 2 = normal, 1 = aggressive")
+
+// ═══════════════════════════════════════════════════════════════════
+//  ГРУППА 7: НАПРАВЛЕНИЕ ТОРГОВЛИ
+// ═══════════════════════════════════════════════════════════════════
+i_long_en   = input.bool(true,  "Лонг сделки",  group="🎯 Направление")
+i_short_en  = input.bool(true,  "Шорт сделки",  group="🎯 Направление")
+
+// ═══════════════════════════════════════════════════════════════════
+//  РАСЧЁТЫ
+// ═══════════════════════════════════════════════════════════════════
+
+// --- EMAs ---
+ema_f  = ta.ema(close, i_ema_fast)
+ema_m  = ta.ema(close, i_ema_mid)
+ema_s  = ta.ema(close, i_ema_slow)
+ema_t  = ta.ema(close, i_ema_trend)
+
+// --- RSI ---
+rsi = ta.rsi(close, i_rsi_len)
+
+// --- ADX ---
+[diplus, diminus, adx_val] = ta.dmi(i_adx_len, i_adx_len)
+
+// --- ATR ---
+atr = ta.atr(i_atr_len)
+
+// --- Объём ---
+vol_ma = ta.sma(volume, i_vol_len)
+vol_ok = volume >= vol_ma * i_vol_mult
+
+// --- Squeeze Momentum (адаптация TTM Squeeze) ---
+// Bollinger Bands
+bb_basis = ta.sma(close, i_sq_len)
+bb_dev   = i_sq_bb * ta.stdev(close, i_sq_len)
+bb_up    = bb_basis + bb_dev
+bb_lo    = bb_basis - bb_dev
+
+// Keltner Channel
+kc_basis = ta.sma(close, i_sq_len)
+kc_rng   = ta.atr(i_sq_len)
+kc_up    = kc_basis + kc_rng * i_sq_kc
+kc_lo    = kc_basis - kc_rng * i_sq_kc
+
+// Squeeze состояния
+sq_on   = bb_lo > kc_lo and bb_up < kc_up   // BB внутри KC = сжатие
+sq_fire = bb_lo < kc_lo and bb_up > kc_up   // BB вышла из KC = взрыв
+
+// Momentum-значение (линейная регрессия отклонения от средней)
+sq_mid    = ((ta.highest(high, i_sq_len) + ta.lowest(low, i_sq_len)) / 2.0 + ta.sma(close, i_sq_len)) / 2.0
+sq_val    = ta.linreg(close - sq_mid, i_sq_len, 0)
+sq_rising = sq_val > sq_val[1]
+
+// Сигналы squeeze
+sq_bull = sq_fire and sq_val > 0 and sq_rising
+sq_bear = sq_fire and sq_val < 0 and not sq_rising
+
+// ═══════════════════════════════════════════════════════════════════
+//  УСЛОВИЯ ВХОДА
+// ═══════════════════════════════════════════════════════════════════
+
+// 1. Тренд выровнен (максимальный вес)
+bull_trend = close > ema_t and ema_f > ema_m and ema_m > ema_s
+bear_trend = close < ema_t and ema_f < ema_m and ema_m < ema_s
+
+// 2. EMA кросс или Squeeze взрыв
+bull_cross  = ta.crossover(ema_f, ema_m)  or (sq_bull and bull_trend)
+bear_cross  = ta.crossunder(ema_f, ema_m) or (sq_bear and bear_trend)
+
+// 3. RSI в рабочей зоне
+rsi_bull_ok = rsi >= i_rsi_bull and rsi < 78
+rsi_bear_ok = rsi <= i_rsi_bear and rsi > 22
+
+// 4. ADX + объём = реальный тренд с деньгами
+adx_vol_ok  = adx_val >= i_adx_min and vol_ok
+
+// --- Подсчёт подтверждений ---
+bull_score = (bull_trend  ? 1 : 0)
+           + (bull_cross  ? 1 : 0)
+           + (rsi_bull_ok ? 1 : 0)
+           + (adx_vol_ok  ? 1 : 0)
+
+bear_score = (bear_trend  ? 1 : 0)
+           + (bear_cross  ? 1 : 0)
+           + (rsi_bear_ok ? 1 : 0)
+           + (adx_vol_ok  ? 1 : 0)
+
+no_position = strategy.position_size == 0
+long_sig    = i_long_en  and bull_score >= i_min_score and no_position
+short_sig   = i_short_en and bear_score >= i_min_score and no_position
+
+// ═══════════════════════════════════════════════════════════════════
+//  ТРЕЙЛИНГ СТОП (ручной расчёт — надёжнее встроенного)
+// ═══════════════════════════════════════════════════════════════════
+var float trail_long  = na
+var float trail_short = na
+var float entry_atr   = na
+
+// Фиксируем ATR в момент входа
+if strategy.position_size != strategy.position_size[1]
+    entry_atr := atr
+
+// Обновляем трейлинг только для открытых позиций.
+// Используем close (не high/low), чтобы трейл не превысил close на баре с
+// длинным фитилём — иначе stop > close вызывает выход на открытии следующего бара.
+if strategy.position_size > 0
+    new_trail_l  = close - entry_atr * i_trail_atr
+    trail_long  := na(trail_long) ? new_trail_l : math.max(trail_long, new_trail_l)
+else
+    trail_long  := na
+
+if strategy.position_size < 0
+    new_trail_s  = close + entry_atr * i_trail_atr
+    trail_short := na(trail_short) ? new_trail_s : math.min(trail_short, new_trail_s)
+else
+    trail_short := na
+
+// Фиксированные уровни
+long_sl  = strategy.position_avg_price - entry_atr * i_sl_atr
+long_tp  = strategy.position_avg_price + entry_atr * i_tp_atr
+short_sl = strategy.position_avg_price + entry_atr * i_sl_atr
+short_tp = strategy.position_avg_price - entry_atr * i_tp_atr
+
+// Финальный стоп для лонга: лучший из фикс. SL и трейлинга
+eff_long_sl  = i_use_trail and not na(trail_long)  ? math.max(long_sl, trail_long)   : long_sl
+eff_short_sl = i_use_trail and not na(trail_short) ? math.min(short_sl, trail_short) : short_sl
+
+// ═══════════════════════════════════════════════════════════════════
+//  ВХОДЫ
+// ═══════════════════════════════════════════════════════════════════
+if long_sig
+    strategy.entry("Long", strategy.long,
+        comment = "▲ S:" + str.tostring(bull_score))
+
+if short_sig
+    strategy.entry("Short", strategy.short,
+        comment = "▼ S:" + str.tostring(bear_score))
+
+// ═══════════════════════════════════════════════════════════════════
+//  ВЫХОДЫ
+// ═══════════════════════════════════════════════════════════════════
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long",
+        stop    = eff_long_sl,
+        limit   = long_tp,
+        comment_loss    = "SL",
+        comment_profit  = "TP")
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short",
+        stop    = eff_short_sl,
+        limit   = short_tp,
+        comment_loss    = "SL",
+        comment_profit  = "TP")
+
+// ═══════════════════════════════════════════════════════════════════
+//  ВИЗУАЛИЗАЦИЯ
+// ═══════════════════════════════════════════════════════════════════
+
+// --- EMA линии ---
+p_ef = plot(ema_f, "EMA 9",   color=color.new(color.aqua,   0), linewidth=1)
+p_em = plot(ema_m, "EMA 21",  color=color.new(color.blue,   0), linewidth=2)
+p_es = plot(ema_s, "EMA 55",  color=color.new(color.orange, 0), linewidth=2)
+p_et = plot(ema_t, "EMA 200", color=color.new(color.red,   20), linewidth=3)
+fill(p_ef, p_em, color = bull_trend ? color.new(color.green, 88) : color.new(color.red, 88))
+
+// --- Сигналы входа ---
+plotshape(long_sig,  "Buy",  shape.triangleup,   location.belowbar,
+    color.new(color.lime,  0), size=size.normal)
+plotshape(short_sig, "Sell", shape.triangledown, location.abovebar,
+    color.new(color.red,   0), size=size.normal)
+
+// --- Score label ---
+var label lbl = na
+label.delete(lbl[1])
+if long_sig
+    lbl := label.new(bar_index, low  - atr * 0.5,
+        "↑" + str.tostring(bull_score) + "/4",
+        color=color.new(color.green, 30), textcolor=color.white,
+        style=label.style_label_up, size=size.small)
+if short_sig
+    lbl := label.new(bar_index, high + atr * 0.5,
+        "↓" + str.tostring(bear_score) + "/4",
+        color=color.new(color.red, 30), textcolor=color.white,
+        style=label.style_label_down, size=size.small)
+
+// --- SL / TP линии активной позиции ---
+var line line_sl = na
+var line line_tp = na
+var line line_tr = na
+line.delete(line_sl[1])
+line.delete(line_tp[1])
+line.delete(line_tr[1])
+
+if strategy.position_size > 0
+    line_sl := line.new(bar_index - 3, eff_long_sl,  bar_index + 3, eff_long_sl,
+        color=color.new(color.red,   0), width=2, style=line.style_dashed)
+    line_tp := line.new(bar_index - 3, long_tp,       bar_index + 3, long_tp,
+        color=color.new(color.lime,  0), width=2, style=line.style_dashed)
+    if i_use_trail and not na(trail_long)
+        line_tr := line.new(bar_index - 3, trail_long, bar_index + 3, trail_long,
+            color=color.new(color.yellow, 0), width=1, style=line.style_dotted)
+
+if strategy.position_size < 0
+    line_sl := line.new(bar_index - 3, eff_short_sl,  bar_index + 3, eff_short_sl,
+        color=color.new(color.red,   0), width=2, style=line.style_dashed)
+    line_tp := line.new(bar_index - 3, short_tp,       bar_index + 3, short_tp,
+        color=color.new(color.lime,  0), width=2, style=line.style_dashed)
+    if i_use_trail and not na(trail_short)
+        line_tr := line.new(bar_index - 3, trail_short, bar_index + 3, trail_short,
+            color=color.new(color.yellow, 0), width=1, style=line.style_dotted)
+
+// --- Фоновая заливка тренда ---
+bgcolor(bull_trend ? color.new(color.green, 97) :
+        bear_trend ? color.new(color.red,   97) : na)
+
+// ═══════════════════════════════════════════════════════════════════
+//  ДАШБОРД (таблица метрик)
+// ═══════════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 13,
+    bgcolor      = color.new(color.black, 55),
+    border_color = color.new(color.gray,  40),
+    border_width = 1,
+    frame_color  = color.new(color.gray,  30),
+    frame_width  = 1)
+
+f_num(v)  => str.tostring(v, "#.##")
+f_pct(v)  => str.tostring(v, "#.#") + "%"
+f_int(v)  => str.tostring(math.round(v))
+
+hdr_bg  = color.new(color.navy,   20)
+hdr_clr = color.white
+val_clr = color.new(color.white,  10)
+ok_clr  = color.new(color.lime,   10)
+bad_clr = color.new(color.red,    10)
+warn_clr= color.orange
+
+// v6-compatible: compute stats manually from grossprofit/grossloss
+// (strategy.wintrades / losstrades renamed in v6; manual tracking is safer)
+var int  _wins = 0
+var int  _loss = 0
+var float _prev_closed = 0.0
+var float _prev_net    = 0.0
+_cur_closed = strategy.closedtrades
+if _cur_closed > _prev_closed
+    if strategy.netprofit >= _prev_net
+        _wins += 1
+    else
+        _loss += 1
+    _prev_net    := strategy.netprofit
+_prev_closed := _cur_closed
+
+total_cl = strategy.closedtrades
+win_cl   = _wins
+los_cl   = _loss
+wr       = total_cl > 0 ? win_cl / total_cl * 100.0 : 0.0
+// profit_factor = gross_profit / |gross_loss|; manual for v6 safety
+_gp      = strategy.grossprofit
+_gl      = math.abs(strategy.grossloss)
+pf       = _gl > 0 ? _gp / _gl : (_gp > 0 ? 999.0 : 0.0)
+np_pct   = strategy.initial_capital > 0 ? strategy.netprofit / strategy.initial_capital * 100.0 : 0.0
+avg_w    = win_cl > 0 ? _gp / win_cl : 0.0
+avg_l    = los_cl > 0 ? _gl / los_cl : 0.0
+rr_real  = avg_l  != 0 ? avg_w / avg_l : 0.0
+
+if barstate.islast
+
+    // Заголовок
+    table.cell(dash, 0, 0, "📊 MFPS v3.5",
+        bgcolor=hdr_bg, text_color=hdr_clr, text_size=size.small)
+    table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period,
+        bgcolor=hdr_bg, text_color=hdr_clr, text_size=size.small)
+
+    // Profit Factor (ключевая метрика)
+    table.cell(dash, 0, 1, "Profit Factor",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 1, f_num(pf),
+        text_color = pf >= 2.5 ? ok_clr : pf >= 1.5 ? warn_clr : bad_clr,
+        text_size=size.small)
+
+    // Net Profit %
+    table.cell(dash, 0, 2, "Чистая прибыль",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 2, f_pct(np_pct),
+        text_color = np_pct > 0 ? ok_clr : bad_clr, text_size=size.small)
+
+    // Win Rate
+    table.cell(dash, 0, 3, "Win Rate",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 3, f_pct(wr),
+        text_color = wr >= 50 ? ok_clr : warn_clr, text_size=size.small)
+
+    // Реальное R:R
+    table.cell(dash, 0, 4, "Avg R:R реальный",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 4, f_num(rr_real) + " : 1",
+        text_color = rr_real >= 2.0 ? ok_clr : rr_real >= 1.0 ? warn_clr : bad_clr,
+        text_size=size.small)
+
+    // Количество сделок
+    table.cell(dash, 0, 5, "Сделок закрыто",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 5, f_int(total_cl) + " (W:" + f_int(win_cl) + " L:" + f_int(los_cl) + ")",
+        text_color=val_clr, text_size=size.small)
+
+    // Max Drawdown
+    table.cell(dash, 0, 6, "Max Drawdown",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 6, f_pct(strategy.max_drawdown_percent),
+        text_color=warn_clr, text_size=size.small)
+
+    // Разделитель
+    table.cell(dash, 0, 7, "─── Индикаторы ───",
+        text_color=color.new(color.gray, 30), text_size=size.tiny)
+    table.cell(dash, 1, 7, "",
+        text_color=color.new(color.gray, 30), text_size=size.tiny)
+
+    // ADX
+    table.cell(dash, 0, 8, "ADX",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 8, f_num(adx_val) + (adx_val >= i_adx_min ? " ✓" : " ✗"),
+        text_color = adx_val >= i_adx_min ? ok_clr : bad_clr,
+        text_size=size.small)
+
+    // RSI
+    table.cell(dash, 0, 9, "RSI",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 9, f_num(rsi),
+        text_color = rsi > 70 ? bad_clr : rsi < 30 ? ok_clr : val_clr,
+        text_size=size.small)
+
+    // Squeeze
+    table.cell(dash, 0, 10, "Squeeze",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 10,
+        sq_on   ? "🔴 Сжатие" :
+        sq_fire ? "🟢 Взрыв!"  : "⚪ Нет",
+        text_color = sq_on ? bad_clr : sq_fire ? ok_clr : val_clr,
+        text_size=size.small)
+
+    // Score текущего бара
+    cur_sc = strategy.position_size > 0 ? bull_score :
+             strategy.position_size < 0 ? bear_score :
+             math.max(bull_score, bear_score)
+    table.cell(dash, 0, 11, "Сигнал Score",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 11, str.tostring(cur_sc) + " / 4",
+        text_color = cur_sc >= i_min_score ? ok_clr : warn_clr,
+        text_size=size.small)
+
+    // Позиция
+    pos_str = strategy.position_size > 0 ? "📈 ЛОНГ"  :
+              strategy.position_size < 0 ? "📉 ШОРТ"  : "⏸ НЕТ"
+    pos_clr_c = strategy.position_size > 0 ? ok_clr   :
+                strategy.position_size < 0 ? bad_clr  : val_clr
+    table.cell(dash, 0, 12, "Позиция",
+        text_color=val_clr, text_size=size.small)
+    table.cell(dash, 1, 12, pos_str,
+        text_color=pos_clr_c, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════
+//  SQUEEZE ГИСТОГРАММА (отдельный pane через plot в overlay=false невозможен,
+//  рисуем цветными барами через barcolor)
+// ═══════════════════════════════════════════════════════════════════
+// Цвет баров: усиливает читаемость без отдельного pane
+barcolor(sq_bull ? color.new(color.lime,  60) :
+         sq_bear ? color.new(color.red,   60) :
+         sq_on   ? color.new(color.gray,  70) : na,
+         title="Squeeze Bar Color")

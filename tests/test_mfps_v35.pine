@@ -1,0 +1,475 @@
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║       MFPS v3.5 — TEST SUITE                                    ║
+// ║  Тестирует каждый блок стратегии независимо                     ║
+// ║  Добавь на график как Indicator (не Strategy)                   ║
+// ║  Все тесты отображаются в таблице справа                        ║
+// ╚══════════════════════════════════════════════════════════════════╝
+//@version=6
+indicator("🧪 MFPS v3.5 — Test Suite", overlay=false, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════════════════
+//  ПАРАМЕТРЫ (идентичны стратегии — не менять без синхронизации)
+// ═══════════════════════════════════════════════════════════════════
+I_EMA_FAST  = 9
+I_EMA_MID   = 21
+I_EMA_SLOW  = 55
+I_EMA_TREND = 200
+I_RSI_LEN   = 14
+I_RSI_BULL  = 52
+I_RSI_BEAR  = 48
+I_ADX_LEN   = 14
+I_ADX_MIN   = 22
+I_SQ_LEN    = 20
+I_SQ_BB     = 2.0
+I_SQ_KC     = 1.5
+I_VOL_LEN   = 20
+I_VOL_MULT  = 1.1
+I_ATR_LEN   = 14
+I_SL_ATR    = 1.5
+I_TP_ATR    = 4.5
+I_TRAIL_ATR = 2.0
+I_MIN_SCORE = 3
+
+// ═══════════════════════════════════════════════════════════════════
+//  ВОСПРОИЗВОДИМ ВСЕ РАСЧЁТЫ СТРАТЕГИИ
+// ═══════════════════════════════════════════════════════════════════
+
+ema_f  = ta.ema(close, I_EMA_FAST)
+ema_m  = ta.ema(close, I_EMA_MID)
+ema_s  = ta.ema(close, I_EMA_SLOW)
+ema_t  = ta.ema(close, I_EMA_TREND)
+
+rsi    = ta.rsi(close, I_RSI_LEN)
+[_dp, _dm, adx_val] = ta.dmi(I_ADX_LEN, I_ADX_LEN)
+atr    = ta.atr(I_ATR_LEN)
+
+vol_ma = ta.sma(volume, I_VOL_LEN)
+vol_ok = volume >= vol_ma * I_VOL_MULT
+
+// Bollinger Bands
+bb_basis = ta.sma(close, I_SQ_LEN)
+bb_dev   = I_SQ_BB * ta.stdev(close, I_SQ_LEN)
+bb_up    = bb_basis + bb_dev
+bb_lo    = bb_basis - bb_dev
+
+// Keltner Channel
+kc_basis = ta.sma(close, I_SQ_LEN)
+kc_rng   = ta.atr(I_SQ_LEN)
+kc_up    = kc_basis + kc_rng * I_SQ_KC
+kc_lo    = kc_basis - kc_rng * I_SQ_KC
+
+sq_on   = bb_lo > kc_lo and bb_up < kc_up
+sq_fire = bb_lo < kc_lo and bb_up > kc_up
+
+sq_mid    = ((ta.highest(high, I_SQ_LEN) + ta.lowest(low, I_SQ_LEN)) / 2.0 + ta.sma(close, I_SQ_LEN)) / 2.0
+sq_val    = ta.linreg(close - sq_mid, I_SQ_LEN, 0)
+sq_rising = sq_val > sq_val[1]
+
+sq_bull = sq_fire and sq_val > 0 and sq_rising
+sq_bear = sq_fire and sq_val < 0 and not sq_rising
+
+// Условия тренда
+bull_trend = close > ema_t and ema_f > ema_m and ema_m > ema_s
+bear_trend = close < ema_t and ema_f < ema_m and ema_m < ema_s
+
+// Кроссоверы / Squeeze
+bull_cross = ta.crossover(ema_f, ema_m)  or (sq_bull and bull_trend)
+bear_cross = ta.crossunder(ema_f, ema_m) or (sq_bear and bear_trend)
+
+// RSI зоны
+rsi_bull_ok = rsi >= I_RSI_BULL and rsi < 78
+rsi_bear_ok = rsi <= I_RSI_BEAR and rsi > 22
+
+// ADX + объём
+adx_vol_ok = adx_val >= I_ADX_MIN and vol_ok
+
+// Score
+bull_score = (bull_trend  ? 1 : 0) + (bull_cross  ? 1 : 0) + (rsi_bull_ok ? 1 : 0) + (adx_vol_ok  ? 1 : 0)
+bear_score = (bear_trend  ? 1 : 0) + (bear_cross  ? 1 : 0) + (rsi_bear_ok ? 1 : 0) + (adx_vol_ok  ? 1 : 0)
+
+// Simulate no_position guard: track whether we'd be in a position.
+// An indicator has no strategy state, so we approximate: a signal fires
+// and is "in position" until the opposite signal fires. This mirrors the
+// strategy's `no_position` guard that blocks re-entry while open.
+var bool _sim_in_long  = false
+var bool _sim_in_short = false
+_raw_long  = bull_score >= I_MIN_SCORE
+_raw_short = bear_score >= I_MIN_SCORE
+long_sig   = _raw_long  and not _sim_in_long  and not _sim_in_short
+short_sig  = _raw_short and not _sim_in_long  and not _sim_in_short
+if long_sig
+    _sim_in_long  := true
+    _sim_in_short := false
+if short_sig
+    _sim_in_short := true
+    _sim_in_long  := false
+
+// Уровни риска (используем условную цену входа = close для теста)
+entry_price_test = close
+long_sl_test  = entry_price_test - atr * I_SL_ATR
+long_tp_test  = entry_price_test + atr * I_TP_ATR
+short_sl_test = entry_price_test + atr * I_SL_ATR
+short_tp_test = entry_price_test - atr * I_TP_ATR
+
+rr_configured = I_TP_ATR / I_SL_ATR   // должно быть >= 2.0
+
+// ═══════════════════════════════════════════════════════════════════
+//  УТИЛИТЫ ДЛЯ ТЕСТОВ
+// ═══════════════════════════════════════════════════════════════════
+
+// Счётчики тестов
+var int total_tests  = 0
+var int passed_tests = 0
+var int failed_tests = 0
+
+// Накопители для статистики по истории
+var int  long_count      = 0
+var int  short_count     = 0
+var int  sq_on_count     = 0
+var int  sq_fire_count   = 0
+var int  score4_count    = 0
+var int  score3_count    = 0
+var int  adx_pass_count  = 0
+var int  vol_pass_count  = 0
+var int  rsi_bull_count  = 0
+var int  rsi_bear_count  = 0
+
+// Накопление статистики на каждом баре
+long_count     += long_sig  ? 1 : 0
+short_count    += short_sig ? 1 : 0
+sq_on_count    += sq_on     ? 1 : 0
+sq_fire_count  += sq_fire   ? 1 : 0
+score4_count   += bull_score == 4 or bear_score == 4 ? 1 : 0
+score3_count   += bull_score == 3 or bear_score == 3 ? 1 : 0
+adx_pass_count += adx_vol_ok ? 1 : 0
+vol_pass_count += vol_ok     ? 1 : 0
+rsi_bull_count += rsi_bull_ok ? 1 : 0
+rsi_bear_count += rsi_bear_ok ? 1 : 0
+
+// ═══════════════════════════════════════════════════════════════════
+//  ВСПОМОГАТЕЛЬНЫЕ ВИЗУАЛЬНЫЕ ТЕСТЫ (графики на pane)
+// ═══════════════════════════════════════════════════════════════════
+
+// Score текущего бара (0–4)
+cur_score = math.max(bull_score, bear_score)
+plot(cur_score,          "Score текущий",   color=color.blue,   linewidth=2)
+plot(I_MIN_SCORE,        "Score мин.",       color=color.orange, linewidth=1, style=plot.style_circles)
+plot(adx_val / 10.0,    "ADX / 10",         color=color.purple, linewidth=1)
+plot(rsi / 100.0 * 4.0, "RSI (норм. 0-4)", color=color.teal,   linewidth=1)
+
+hline(I_MIN_SCORE,  "Порог Score",  color=color.new(color.orange, 50), linestyle=hline.style_dashed)
+hline(4,            "Score MAX",    color=color.new(color.green,  60), linestyle=hline.style_dotted)
+hline(0,            "Score MIN",    color=color.new(color.red,    60), linestyle=hline.style_dotted)
+
+bgcolor(long_sig  ? color.new(color.green, 90) :
+        short_sig ? color.new(color.red,   90) : na)
+
+// ═══════════════════════════════════════════════════════════════════
+//  ФИНАЛЬНАЯ ТАБЛИЦА РЕЗУЛЬТАТОВ (только последний бар)
+// ═══════════════════════════════════════════════════════════════════
+var table t = table.new(position.top_right, 4, 34,
+    bgcolor      = color.new(color.black, 50),
+    border_color = color.new(color.gray, 40),
+    border_width = 1,
+    frame_color  = color.new(color.gray, 30),
+    frame_width  = 1)
+
+PASS = "✅ PASS"
+FAIL = "❌ FAIL"
+INFO = "ℹ️ INFO"
+
+pass_c = color.new(color.lime,   10)
+fail_c = color.new(color.red,    10)
+info_c = color.new(color.yellow, 10)
+hdr_c  = color.new(color.navy,   20)
+txt_c  = color.new(color.white,  10)
+dim_c  = color.new(color.gray,   30)
+
+f2(v) => str.tostring(v, "#.##")
+fp(v) => str.tostring(v, "#.#") + "%"
+fi(v) => str.tostring(math.round(v))
+
+total_bars = bar_index + 1
+
+if barstate.islast
+
+    // ── Заголовок ──────────────────────────────────────────────────
+    table.cell(t, 0, 0, "🧪 MFPS v3.5 TEST SUITE", bgcolor=hdr_c, text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, syminfo.ticker,             bgcolor=hdr_c, text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 0, timeframe.period,           bgcolor=hdr_c, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, 0, fi(total_bars) + " баров",  bgcolor=hdr_c, text_color=color.white, text_size=size.small)
+
+    // Колонки
+    table.cell(t, 0, 1, "ТЕСТ",     bgcolor=hdr_c, text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, 1, "ЗНАЧЕНИЕ", bgcolor=hdr_c, text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, 1, "ОЖИДАНИЕ", bgcolor=hdr_c, text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, 1, "СТАТУС",   bgcolor=hdr_c, text_color=txt_c, text_size=size.tiny)
+
+    row = 2
+
+    // ── БЛОК 1: EMA РАСЧЁТЫ ────────────────────────────────────────
+    table.cell(t, 0, row, "── EMA ──", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 1, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 2, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 3, row, "", text_color=dim_c, text_size=size.tiny)
+    row := row + 1
+
+    // T01: EMA fast < EMA trend при медвежьем тренде (или обратное)
+    t01_ok   = not (bull_trend and bear_trend)   // не могут быть оба true
+    t01_val  = bull_trend ? "bull" : bear_trend ? "bear" : "flat"
+    t01_exp  = "bull / bear / flat"
+    table.cell(t, 0, row, "T01: bull/bear взаимоисключение", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, t01_val, text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, t01_exp, text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t01_ok ? PASS : FAIL, text_color=t01_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T02: EMA fast не NaN
+    t02_ok  = not na(ema_f)
+    table.cell(t, 0, row, "T02: EMA 9 не NA", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, t02_ok ? f2(ema_f) : "NA", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "число", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t02_ok ? PASS : FAIL, text_color=t02_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T03: EMA trend не NaN (требует 200+ баров)
+    t03_ok  = not na(ema_t)
+    table.cell(t, 0, row, "T03: EMA 200 не NA (≥200 баров)", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, t03_ok ? f2(ema_t) : "NA — нужно ≥200 баров", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "число", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t03_ok ? PASS : FAIL, text_color=t03_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // ── БЛОК 2: RSI ────────────────────────────────────────────────
+    table.cell(t, 0, row, "── RSI ──", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 1, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 2, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 3, row, "", text_color=dim_c, text_size=size.tiny)
+    row := row + 1
+
+    // T04: RSI в диапазоне 0–100
+    t04_ok  = not na(rsi) and rsi >= 0 and rsi <= 100
+    table.cell(t, 0, row, "T04: RSI диапазон [0, 100]", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, f2(rsi), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "0 ≤ RSI ≤ 100", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t04_ok ? PASS : FAIL, text_color=t04_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T05: rsi_bull_ok исключает RSI >= 78
+    t05_ok  = not (rsi_bull_ok and rsi >= 78)
+    table.cell(t, 0, row, "T05: rsi_bull_ok не пропускает RSI ≥ 78", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "RSI=" + f2(rsi) + " rsi_bull_ok=" + str.tostring(rsi_bull_ok), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "rsi_bull_ok=false при RSI≥78", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t05_ok ? PASS : FAIL, text_color=t05_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T06: rsi_bear_ok исключает RSI <= 22
+    t06_ok  = not (rsi_bear_ok and rsi <= 22)
+    table.cell(t, 0, row, "T06: rsi_bear_ok не пропускает RSI ≤ 22", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "RSI=" + f2(rsi) + " rsi_bear_ok=" + str.tostring(rsi_bear_ok), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "rsi_bear_ok=false при RSI≤22", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t06_ok ? PASS : FAIL, text_color=t06_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // ── БЛОК 3: ADX + ОБЪЁМ ────────────────────────────────────────
+    table.cell(t, 0, row, "── ADX + VOL ──", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 1, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 2, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 3, row, "", text_color=dim_c, text_size=size.tiny)
+    row := row + 1
+
+    // T07: ADX не NaN и >= 0
+    t07_ok  = not na(adx_val) and adx_val >= 0
+    table.cell(t, 0, row, "T07: ADX корректен", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, f2(adx_val), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "≥ 0, не NA", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t07_ok ? PASS : FAIL, text_color=t07_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T08: vol_ok требует volume > 0
+    t08_ok  = vol_ok ? volume > 0 : true
+    table.cell(t, 0, row, "T08: vol_ok только если volume > 0", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "vol=" + f2(volume) + " ma=" + f2(vol_ma), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "vol ≥ " + f2(I_VOL_MULT) + "x MA", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t08_ok ? PASS : FAIL, text_color=t08_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T09: adx_vol_ok = ADX AND vol
+    t09_ok  = adx_vol_ok == (adx_val >= I_ADX_MIN and vol_ok)
+    table.cell(t, 0, row, "T09: adx_vol_ok = ADX AND vol", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, str.tostring(adx_vol_ok), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "AND логика верна", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t09_ok ? PASS : FAIL, text_color=t09_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // ── БЛОК 4: SQUEEZE ────────────────────────────────────────────
+    table.cell(t, 0, row, "── SQUEEZE ──", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 1, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 2, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 3, row, "", text_color=dim_c, text_size=size.tiny)
+    row := row + 1
+
+    // T10: sq_on и sq_fire взаимоисключают
+    t10_ok  = not (sq_on and sq_fire)
+    table.cell(t, 0, row, "T10: sq_on и sq_fire взаимоисключение", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "on=" + str.tostring(sq_on) + " fire=" + str.tostring(sq_fire), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "не оба true", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t10_ok ? PASS : FAIL, text_color=t10_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T11: sq_bull требует sq_fire
+    t11_ok  = sq_bull ? sq_fire : true
+    table.cell(t, 0, row, "T11: sq_bull требует sq_fire=true", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "sq_bull=" + str.tostring(sq_bull) + " fire=" + str.tostring(sq_fire), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "sq_bull → sq_fire", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t11_ok ? PASS : FAIL, text_color=t11_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T12: sq_bear требует sq_fire
+    t12_ok  = sq_bear ? sq_fire : true
+    table.cell(t, 0, row, "T12: sq_bear требует sq_fire=true", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "sq_bear=" + str.tostring(sq_bear) + " fire=" + str.tostring(sq_fire), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "sq_bear → sq_fire", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t12_ok ? PASS : FAIL, text_color=t12_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T13: sq_bull и sq_bear не одновременно
+    t13_ok  = not (sq_bull and sq_bear)
+    table.cell(t, 0, row, "T13: sq_bull и sq_bear взаимоисключение", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "bull=" + str.tostring(sq_bull) + " bear=" + str.tostring(sq_bear), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "не оба true", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t13_ok ? PASS : FAIL, text_color=t13_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // ── БЛОК 5: SCORE СИСТЕМА ──────────────────────────────────────
+    table.cell(t, 0, row, "── SCORE ──", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 1, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 2, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 3, row, "", text_color=dim_c, text_size=size.tiny)
+    row := row + 1
+
+    // T14: bull_score в диапазоне [0, 4]
+    t14_ok  = bull_score >= 0 and bull_score <= 4
+    table.cell(t, 0, row, "T14: bull_score ∈ [0, 4]", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, fi(bull_score), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "0 ≤ score ≤ 4", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t14_ok ? PASS : FAIL, text_color=t14_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T15: bear_score в диапазоне [0, 4]
+    t15_ok  = bear_score >= 0 and bear_score <= 4
+    table.cell(t, 0, row, "T15: bear_score ∈ [0, 4]", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, fi(bear_score), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "0 ≤ score ≤ 4", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t15_ok ? PASS : FAIL, text_color=t15_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T16: long_sig требует bull_score >= MIN_SCORE
+    t16_ok  = long_sig ? bull_score >= I_MIN_SCORE : true
+    table.cell(t, 0, row, "T16: long_sig → bull_score ≥ " + fi(I_MIN_SCORE), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "long_sig=" + str.tostring(long_sig) + " score=" + fi(bull_score), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "score ≥ " + fi(I_MIN_SCORE) + " при сигнале", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t16_ok ? PASS : FAIL, text_color=t16_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T17: short_sig требует bear_score >= MIN_SCORE
+    t17_ok  = short_sig ? bear_score >= I_MIN_SCORE : true
+    table.cell(t, 0, row, "T17: short_sig → bear_score ≥ " + fi(I_MIN_SCORE), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "short_sig=" + str.tostring(short_sig) + " score=" + fi(bear_score), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "score ≥ " + fi(I_MIN_SCORE) + " при сигнале", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t17_ok ? PASS : FAIL, text_color=t17_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // ── БЛОК 6: РИСК-МЕНЕДЖМЕНТ ────────────────────────────────────
+    table.cell(t, 0, row, "── RISK / MONEY ──", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 1, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 2, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 3, row, "", text_color=dim_c, text_size=size.tiny)
+    row := row + 1
+
+    // T18: R:R конфигурированный >= 2.0 (для Profit Factor >= 2.5 нужно R:R >= 2)
+    t18_ok  = rr_configured >= 2.0
+    table.cell(t, 0, row, "T18: R:R конфиг ≥ 2.0", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, f2(rr_configured) + " : 1", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "≥ 2.0 : 1", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t18_ok ? PASS : FAIL, text_color=t18_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T19: long SL < close (стоп ниже цены)
+    t19_ok  = long_sl_test < close
+    table.cell(t, 0, row, "T19: Long SL < Close", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "SL=" + f2(long_sl_test) + " C=" + f2(close), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "SL < Close", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t19_ok ? PASS : FAIL, text_color=t19_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T20: long TP > close
+    t20_ok  = long_tp_test > close
+    table.cell(t, 0, row, "T20: Long TP > Close", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, "TP=" + f2(long_tp_test) + " C=" + f2(close), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "TP > Close", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t20_ok ? PASS : FAIL, text_color=t20_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // T21: ATR > 0
+    t21_ok  = atr > 0 and not na(atr)
+    table.cell(t, 0, row, "T21: ATR > 0", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, f2(atr), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "> 0, не NA", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t21_ok ? PASS : FAIL, text_color=t21_ok ? pass_c : fail_c, text_size=size.tiny)
+    row := row + 1
+
+    // ── БЛОК 7: ИСТОРИЧЕСКИЕ МЕТРИКИ ───────────────────────────────
+    table.cell(t, 0, row, "── ИСТОРИЯ ──", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 1, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 2, row, "", text_color=dim_c, text_size=size.tiny)
+    table.cell(t, 3, row, "", text_color=dim_c, text_size=size.tiny)
+    row := row + 1
+
+    // T22: Лонг сигналов разумное кол-во (0.5% – 20% баров)
+    long_rate  = total_bars > 0 ? long_count  / total_bars * 100.0 : 0.0
+    t22_ok     = long_rate >= 0.5 and long_rate <= 20.0
+    table.cell(t, 0, row, "T22: Частота лонг (0.5%–20%)", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, fp(long_rate) + " (" + fi(long_count) + " сигн.)", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "0.5% ≤ freq ≤ 20%", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t22_ok ? PASS : (long_rate < 0.5 ? "⚠️ РЕДКО" : "⚠️ ЧАСТО"), text_color=t22_ok ? pass_c : info_c, text_size=size.tiny)
+    row := row + 1
+
+    // T23: Шорт сигналов разумное кол-во
+    short_rate = total_bars > 0 ? short_count / total_bars * 100.0 : 0.0
+    t23_ok     = short_rate >= 0.5 and short_rate <= 20.0
+    table.cell(t, 0, row, "T23: Частота шорт (0.5%–20%)", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, fp(short_rate) + " (" + fi(short_count) + " сигн.)", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "0.5% ≤ freq ≤ 20%", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, t23_ok ? PASS : (short_rate < 0.5 ? "⚠️ РЕДКО" : "⚠️ ЧАСТО"), text_color=t23_ok ? pass_c : info_c, text_size=size.tiny)
+    row := row + 1
+
+    // T24 — INFO: % баров в Squeeze (информативно)
+    sq_rate = total_bars > 0 ? sq_on_count / total_bars * 100.0 : 0.0
+    table.cell(t, 0, row, "T24: Squeeze ON % (инфо)", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 1, row, fp(sq_rate), text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 2, row, "20%–80% = норма", text_color=txt_c, text_size=size.tiny)
+    table.cell(t, 3, row, INFO, text_color=info_c, text_size=size.tiny)
+    row := row + 1
+
+    // ── ИТОГ ───────────────────────────────────────────────────────
+    all_tests = 21   // T01–T21 (T22-T23 warning/info, не считаем жёсткими)
+    cnt_pass  = (t01_ok ? 1 : 0) + (t02_ok ? 1 : 0) + (t03_ok ? 1 : 0) +
+                (t04_ok ? 1 : 0) + (t05_ok ? 1 : 0) + (t06_ok ? 1 : 0) +
+                (t07_ok ? 1 : 0) + (t08_ok ? 1 : 0) + (t09_ok ? 1 : 0) +
+                (t10_ok ? 1 : 0) + (t11_ok ? 1 : 0) + (t12_ok ? 1 : 0) +
+                (t13_ok ? 1 : 0) + (t14_ok ? 1 : 0) + (t15_ok ? 1 : 0) +
+                (t16_ok ? 1 : 0) + (t17_ok ? 1 : 0) + (t18_ok ? 1 : 0) +
+                (t19_ok ? 1 : 0) + (t20_ok ? 1 : 0) + (t21_ok ? 1 : 0)
+    cnt_fail  = all_tests - cnt_pass
+    all_ok    = cnt_fail == 0
+
+    summ_bg   = all_ok ? color.new(color.green, 50) : color.new(color.red, 50)
+    table.cell(t, 0, row, "ИТОГ: " + fi(cnt_pass) + "/" + fi(all_tests) + " тестов пройдено",
+        bgcolor=summ_bg, text_color=color.white, text_size=size.small)
+    table.cell(t, 1, row, "FAIL: " + fi(cnt_fail),
+        bgcolor=summ_bg, text_color=cnt_fail > 0 ? color.red : color.white, text_size=size.small)
+    table.cell(t, 2, row, fp(long_rate) + " L / " + fp(short_rate) + " S",
+        bgcolor=summ_bg, text_color=color.white, text_size=size.small)
+    table.cell(t, 3, row, all_ok ? "✅ ВСЕ OK" : "❌ ЕСТЬ ОШИБКИ",
+        bgcolor=summ_bg, text_color=color.white, text_size=size.small)
