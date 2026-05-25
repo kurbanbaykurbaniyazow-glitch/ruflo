@@ -164,15 +164,17 @@ var float entry_atr   = na
 if strategy.position_size != strategy.position_size[1]
     entry_atr := atr
 
-// Обновляем трейлинг только для открытых позиций
+// Обновляем трейлинг только для открытых позиций.
+// Используем close (не high/low), чтобы трейл не превысил close на баре с
+// длинным фитилём — иначе stop > close вызывает выход на открытии следующего бара.
 if strategy.position_size > 0
-    new_trail_l  = high - entry_atr * i_trail_atr
+    new_trail_l  = close - entry_atr * i_trail_atr
     trail_long  := na(trail_long) ? new_trail_l : math.max(trail_long, new_trail_l)
 else
     trail_long  := na
 
 if strategy.position_size < 0
-    new_trail_s  = low + entry_atr * i_trail_atr
+    new_trail_s  = close + entry_atr * i_trail_atr
     trail_short := na(trail_short) ? new_trail_s : math.min(trail_short, new_trail_s)
 else
     trail_short := na

@@ -87,8 +87,22 @@ adx_vol_ok = adx_val >= I_ADX_MIN and vol_ok
 bull_score = (bull_trend  ? 1 : 0) + (bull_cross  ? 1 : 0) + (rsi_bull_ok ? 1 : 0) + (adx_vol_ok  ? 1 : 0)
 bear_score = (bear_trend  ? 1 : 0) + (bear_cross  ? 1 : 0) + (rsi_bear_ok ? 1 : 0) + (adx_vol_ok  ? 1 : 0)
 
-long_sig  = bull_score >= I_MIN_SCORE
-short_sig = bear_score >= I_MIN_SCORE
+// Simulate no_position guard: track whether we'd be in a position.
+// An indicator has no strategy state, so we approximate: a signal fires
+// and is "in position" until the opposite signal fires. This mirrors the
+// strategy's `no_position` guard that blocks re-entry while open.
+var bool _sim_in_long  = false
+var bool _sim_in_short = false
+_raw_long  = bull_score >= I_MIN_SCORE
+_raw_short = bear_score >= I_MIN_SCORE
+long_sig   = _raw_long  and not _sim_in_long  and not _sim_in_short
+short_sig  = _raw_short and not _sim_in_long  and not _sim_in_short
+if long_sig
+    _sim_in_long  := true
+    _sim_in_short := false
+if short_sig
+    _sim_in_short := true
+    _sim_in_long  := false
 
 // Уровни риска (используем условную цену входа = close для теста)
 entry_price_test = close
