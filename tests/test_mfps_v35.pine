@@ -4,7 +4,7 @@
 // ║  Добавь на график как Indicator (не Strategy)                   ║
 // ║  Все тесты отображаются в таблице справа                        ║
 // ╚══════════════════════════════════════════════════════════════════╝
-//@version=5
+//@version=6
 indicator("🧪 MFPS v3.5 — Test Suite", overlay=false, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════
@@ -61,7 +61,7 @@ kc_lo    = kc_basis - kc_rng * I_SQ_KC
 sq_on   = bb_lo > kc_lo and bb_up < kc_up
 sq_fire = bb_lo < kc_lo and bb_up > kc_up
 
-sq_mid    = math.avg(math.avg(ta.highest(high, I_SQ_LEN), ta.lowest(low, I_SQ_LEN)), ta.sma(close, I_SQ_LEN))
+sq_mid    = ((ta.highest(high, I_SQ_LEN) + ta.lowest(low, I_SQ_LEN)) / 2.0 + ta.sma(close, I_SQ_LEN)) / 2.0
 sq_val    = ta.linreg(close - sq_mid, I_SQ_LEN, 0)
 sq_rising = sq_val > sq_val[1]
 
@@ -153,7 +153,7 @@ bgcolor(long_sig  ? color.new(color.green, 90) :
 // ═══════════════════════════════════════════════════════════════════
 //  ФИНАЛЬНАЯ ТАБЛИЦА РЕЗУЛЬТАТОВ (только последний бар)
 // ═══════════════════════════════════════════════════════════════════
-var table t = table.new(position.top_right, 4, 26,
+var table t = table.new(position.top_right, 4, 34,
     bgcolor      = color.new(color.black, 50),
     border_color = color.new(color.gray, 40),
     border_width = 1,
