@@ -1,0 +1,580 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║   SMART MONEY CONCEPTS (SMC) STRATEGY  v2.0                         ║
+// ║   Концепты ICT: BOS · CHoCH · Order Blocks · FVG · Liquidity        ║
+// ║   Premium/Discount · Kill Zones · Trailing Stop                      ║
+// ║   Целевой Profit Factor: 2.5 – 5.0 | R:R мин. 3:1                   ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+//@version=6
+strategy("🏛️ SMC Strategy v2.0",
+    shorttitle              = "SMC v2",
+    overlay                 = true,
+    initial_capital         = 10000,
+    default_qty_type        = strategy.percent_of_equity,
+    default_qty_value       = 10,
+    commission_type         = strategy.commission.percent,
+    commission_value        = 0.075,
+    slippage                = 2,
+    max_bars_back           = 500,
+    pyramiding              = 0,
+    process_orders_on_close = false,
+    calc_on_every_tick      = false)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ═══════════════════════════════════════════════════════════════════════
+
+// --- Market Structure ---
+i_piv     = input.int(10,  "Pivot Length",         minval=3,  maxval=30,  group="📐 Market Structure")
+i_ob_age  = input.int(50,  "OB Max Age (bars)",     minval=10, maxval=200, group="📐 Market Structure")
+
+// --- Filters ---
+i_fvg     = input.bool(true,  "FVG Confluence",    group="🔍 Filters")
+i_pd      = input.bool(true,  "Premium/Discount",  group="🔍 Filters")
+i_kz      = input.bool(false, "Kill Zones только", group="🔍 Filters")
+i_bos_only= input.bool(false, "Только CHoCH (не BOS)", group="🔍 Filters",
+    tooltip="true = входить только на смене тренда (CHoCH), false = также на BOS (продолжение)")
+
+// --- Risk Management ---
+i_atr_len = input.int(14,   "ATR Period",       minval=5,  maxval=30,  group="⚙️ Risk")
+i_sl_atr  = input.float(1.5,"SL (×ATR)",        minval=0.5,maxval=5.0, step=0.1, group="⚙️ Risk")
+i_tp_atr  = input.float(4.5,"TP (×ATR)",        minval=1.0,maxval=15.0,step=0.1, group="⚙️ Risk")
+i_trail   = input.bool(true, "Trailing Stop",                            group="⚙️ Risk")
+i_tr_atr  = input.float(2.0,"Trail (×ATR)",     minval=0.5,maxval=5.0, step=0.1, group="⚙️ Risk")
+
+// --- Direction ---
+i_long    = input.bool(true,  "Лонг сделки",  group="🎯 Direction")
+i_short   = input.bool(true,  "Шорт сделки",  group="🎯 Direction")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  BASE INDICATORS
+// ═══════════════════════════════════════════════════════════════════════
+atr   = ta.atr(i_atr_len)
+ema50 = ta.ema(close, 50)
+ema200= ta.ema(close, 200)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  1. SWING HIGH / SWING LOW DETECTION
+//     ta.pivothigh/low возвращает значение с задержкой i_piv баров
+// ═══════════════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, i_piv, i_piv)  // значение свинг-хая i_piv баров назад
+pl = ta.pivotlow (low,  i_piv, i_piv)  // значение свинг-лоя i_piv баров назад
+
+// Последние два подтверждённых свинга
+var float sh1 = na          // последний swing high (цена)
+var int   sh1_i = na        // его bar_index
+var float sh2 = na          // предыдущий swing high
+var int   sh2_i = na
+
+var float sl1 = na          // последний swing low
+var int   sl1_i = na
+var float sl2 = na
+var int   sl2_i = na
+
+// Сохраняем тело свечи в момент свинга (для OB)
+var float ph_open = na      // open свечи на swing high
+var float ph_high = na      // high
+var float ph_low  = na      // low
+var float ph_close= na      // close
+
+var float pl_open = na
+var float pl_high = na
+var float pl_low  = na
+var float pl_close= na
+
+if not na(ph)
+    sh2   := sh1
+    sh2_i := sh1_i
+    sh1   := ph
+    sh1_i := bar_index - i_piv
+    // Сохраняем OHLC той свечи (фиксированный lookback = i_piv)
+    ph_open  := open [i_piv]
+    ph_high  := high [i_piv]
+    ph_low   := low  [i_piv]
+    ph_close := close[i_piv]
+
+if not na(pl)
+    sl2   := sl1
+    sl2_i := sl1_i
+    sl1   := pl
+    sl1_i := bar_index - i_piv
+    pl_open  := open [i_piv]
+    pl_high  := high [i_piv]
+    pl_low   := low  [i_piv]
+    pl_close := close[i_piv]
+
+// ═══════════════════════════════════════════════════════════════════════
+//  2. MARKET STRUCTURE: BOS / CHoCH
+//
+//  BOS Bullish  = close > sh1  → рынок продолжает расти
+//  BOS Bearish  = close < sl1  → рынок продолжает падать
+//  CHoCH Bull   = BOS Bullish в условиях медвежьего тренда (разворот вверх)
+//  CHoCH Bear   = BOS Bearish в условиях бычьего тренда   (разворот вниз)
+// ═══════════════════════════════════════════════════════════════════════
+var int trend = 0   // 1 = bullish, -1 = bearish, 0 = undefined
+
+bos_bull  = not na(sh1) and close > sh1 and close[1] <= sh1
+bos_bear  = not na(sl1) and close < sl1 and close[1] >= sl1
+
+choch_bull = (trend == -1 or trend == 0) and bos_bull
+choch_bear = (trend ==  1 or trend == 0) and bos_bear
+
+// Обновляем тренд
+if bos_bull
+    trend := 1
+if bos_bear
+    trend := -1
+
+// ═══════════════════════════════════════════════════════════════════════
+//  3. ORDER BLOCKS
+//
+//  Bullish OB = свеча на последнем swing low (institutional demand zone)
+//               Актуальна после BOS/CHoCH в сторону роста
+//  Bearish OB = свеча на последнем swing high (institutional supply zone)
+//               Актуальна после BOS/CHoCH в сторону падения
+//
+//  Зона OB = [low свечи, high свечи] (полный диапазон)
+//  Вход: когда цена возвращается В эту зону снизу (bull) / сверху (bear)
+// ═══════════════════════════════════════════════════════════════════════
+var float ob_b_hi  = na     // Bullish OB верхняя граница
+var float ob_b_lo  = na     // Bullish OB нижняя граница
+var int   ob_b_age = 0      // баров с момента создания
+var bool  ob_b_ok  = false  // активен
+
+var float ob_s_hi  = na     // Bearish OB (supply)
+var float ob_s_lo  = na
+var int   ob_s_age = 0
+var bool  ob_s_ok  = false
+
+// Кандидаты на OB (сохраняем при каждом свинге, активируем после BOS)
+var float ob_b_cand_hi = na
+var float ob_b_cand_lo = na
+var float ob_s_cand_hi = na
+var float ob_s_cand_lo = na
+
+// Обновляем кандидата при каждом новом свинг-лоу
+if not na(pl)
+    ob_b_cand_hi := pl_high
+    ob_b_cand_lo := pl_low
+
+// Обновляем кандидата при каждом новом свинг-хае
+if not na(ph)
+    ob_s_cand_hi := ph_high
+    ob_s_cand_lo := ph_low
+
+// Активируем OB при BOS/CHoCH
+activate_bull = i_bos_only ? choch_bull : bos_bull
+activate_bear = i_bos_only ? choch_bear : bos_bear
+
+if activate_bull and not na(ob_b_cand_hi)
+    ob_b_hi  := ob_b_cand_hi
+    ob_b_lo  := ob_b_cand_lo
+    ob_b_age := 0
+    ob_b_ok  := true
+
+if activate_bear and not na(ob_s_cand_hi)
+    ob_s_hi  := ob_s_cand_hi
+    ob_s_lo  := ob_s_cand_lo
+    ob_s_age := 0
+    ob_s_ok  := true
+
+// Старение и инвалидация OB
+if ob_b_ok
+    ob_b_age := ob_b_age + 1
+    // OB инвалидируется: цена закрылась НИЖЕ нижней границы OB (пробой)
+    if ob_b_age > i_ob_age or close < ob_b_lo
+        ob_b_ok := false
+
+if ob_s_ok
+    ob_s_age := ob_s_age + 1
+    if ob_s_age > i_ob_age or close > ob_s_hi
+        ob_s_ok := false
+
+// Цена В зоне OB
+in_ob_bull = ob_b_ok and low  <= ob_b_hi and close >= ob_b_lo
+in_ob_bear = ob_s_ok and high >= ob_s_lo and close <= ob_s_hi
+
+// ═══════════════════════════════════════════════════════════════════════
+//  4. FAIR VALUE GAPS (FVG / Imbalance)
+//
+//  Bullish FVG: low текущей свечи > high свечи 2 бара назад
+//               Зона = [high[2], low[0]] → institutional gap вверх
+//  Bearish FVG: high текущей свечи < low свечи 2 бара назад
+//               Зона = [high[0], low[2]] → institutional gap вниз
+//
+//  Вход: когда цена возвращается в зону FVG (mitigation)
+// ═══════════════════════════════════════════════════════════════════════
+fvg_b_now = low  > high[2]   // бычий FVG только что сформировался
+fvg_s_now = high < low[2]    // медвежий FVG
+
+var float fvg_b_hi  = na
+var float fvg_b_lo  = na
+var int   fvg_b_age = 0
+var bool  fvg_b_ok  = false
+
+var float fvg_s_hi  = na
+var float fvg_s_lo  = na
+var int   fvg_s_age = 0
+var bool  fvg_s_ok  = false
+
+// Регистрируем FVG только в направлении тренда
+if fvg_b_now and trend == 1
+    fvg_b_hi  := low          // верх зоны = текущий low
+    fvg_b_lo  := high[2]      // низ зоны = high 2 бара назад
+    fvg_b_age := 0
+    fvg_b_ok  := true
+
+if fvg_s_now and trend == -1
+    fvg_s_hi  := low[2]       // верх зоны = low 2 бара назад
+    fvg_s_lo  := high          // низ зоны = текущий high
+    fvg_s_age := 0
+    fvg_s_ok  := true
+
+// Старение FVG
+if fvg_b_ok
+    fvg_b_age := fvg_b_age + 1
+    if fvg_b_age > i_ob_age or close < fvg_b_lo
+        fvg_b_ok := false
+
+if fvg_s_ok
+    fvg_s_age := fvg_s_age + 1
+    if fvg_s_age > i_ob_age or close > fvg_s_hi
+        fvg_s_ok := false
+
+// Цена В зоне FVG
+in_fvg_bull = fvg_b_ok and low  <= fvg_b_hi and close >= fvg_b_lo
+in_fvg_bear = fvg_s_ok and high >= fvg_s_lo and close <= fvg_s_hi
+
+// ═══════════════════════════════════════════════════════════════════════
+//  5. LIQUIDITY LEVELS
+//     Equal highs/lows = зоны ликвидности, которые рынок стремится захватить
+// ═══════════════════════════════════════════════════════════════════════
+// Уровни дневной ликвидности (предыдущий день High/Low)
+prev_day_high = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_on)
+prev_day_low  = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_on)
+
+// Захват ликвидности (Liquidity Sweep): цена вышла за уровень и вернулась
+liq_sweep_bull = low  < prev_day_low  and close > prev_day_low   // sweep below PDL → buy
+liq_sweep_bear = high > prev_day_high and close < prev_day_high  // sweep above PDH → sell
+
+// ═══════════════════════════════════════════════════════════════════════
+//  6. PREMIUM / DISCOUNT ZONES
+//     50% от последнего диапазона swing high – swing low
+//     Discount (ниже 50%) = зона покупки
+//     Premium  (выше 50%) = зона продажи
+// ═══════════════════════════════════════════════════════════════════════
+var float rng_hi = na
+var float rng_lo = na
+
+if not na(sh1) and not na(sl1)
+    rng_hi := math.max(sh1, sl1)
+    rng_lo := math.min(sh1, sl1)
+
+eq_line    = not na(rng_hi) ? (rng_hi + rng_lo) / 2.0 : na
+in_discount = not na(eq_line) ? close <= eq_line : true
+in_premium  = not na(eq_line) ? close >= eq_line : true
+
+// ═══════════════════════════════════════════════════════════════════════
+//  7. KILL ZONES (London + New York Open Sessions)
+//     Лучшее время для входа по SMC — открытие сессий
+// ═══════════════════════════════════════════════════════════════════════
+// time() возвращает не-na только если бар внутри сессии
+in_london = not na(time(timeframe.period, "0700-1000:1234567", "UTC"))
+in_ny     = not na(time(timeframe.period, "1330-1600:1234567", "UTC"))
+in_asia   = not na(time(timeframe.period, "0000-0300:1234567", "UTC"))
+kill_zone = in_london or in_ny
+session_ok = i_kz ? kill_zone : true
+
+// ═══════════════════════════════════════════════════════════════════════
+//  8. ENTRY SIGNALS
+//
+//  ЛОНГ = тренд бычий (trend == 1)
+//       + цена вернулась в Bullish OB ИЛИ Bullish FVG (Point of Interest)
+//       + [опц.] цена в Discount зоне
+//       + [опц.] Kill Zone
+//       + OR: Liquidity Sweep снизу (дополнительный триггер)
+//
+//  ШОРТ = зеркально
+// ═══════════════════════════════════════════════════════════════════════
+poi_bull = in_ob_bull or (i_fvg and in_fvg_bull)    // точка интереса
+poi_bear = in_ob_bear or (i_fvg and in_fvg_bear)
+
+pd_bull  = i_pd ? in_discount : true
+pd_bear  = i_pd ? in_premium  : true
+
+no_pos   = strategy.position_size == 0
+
+long_sig  = i_long  and no_pos and trend == 1 and (poi_bull or liq_sweep_bull) and pd_bull and session_ok
+short_sig = i_short and no_pos and trend == -1 and (poi_bear or liq_sweep_bear) and pd_bear and session_ok
+
+// ═══════════════════════════════════════════════════════════════════════
+//  9. ENTRIES
+// ═══════════════════════════════════════════════════════════════════════
+if long_sig
+    _tag = in_ob_bull ? "OB▲" : liq_sweep_bull ? "LSW▲" : "FVG▲"
+    strategy.entry("Long", strategy.long, comment=_tag)
+
+if short_sig
+    _tag = in_ob_bear ? "OB▼" : liq_sweep_bear ? "LSW▼" : "FVG▼"
+    strategy.entry("Short", strategy.short, comment=_tag)
+
+// ═══════════════════════════════════════════════════════════════════════
+//  10. EXITS: ATR SL/TP + Trailing Stop
+// ═══════════════════════════════════════════════════════════════════════
+var float entry_atr   = na
+var float trail_long  = na
+var float trail_short = na
+
+// Фиксируем ATR на момент входа
+if strategy.position_size != strategy.position_size[1]
+    entry_atr := atr
+
+long_sl  = strategy.position_avg_price - entry_atr * i_sl_atr
+long_tp  = strategy.position_avg_price + entry_atr * i_tp_atr
+short_sl = strategy.position_avg_price + entry_atr * i_sl_atr
+short_tp = strategy.position_avg_price - entry_atr * i_tp_atr
+
+// Trailing: обновляем от close (не от high, чтобы фитиль не триггерил)
+if strategy.position_size > 0
+    _new = close - entry_atr * i_tr_atr
+    trail_long  := na(trail_long)  ? _new : math.max(trail_long,  _new)
+else
+    trail_long  := na
+
+if strategy.position_size < 0
+    _new = close + entry_atr * i_tr_atr
+    trail_short := na(trail_short) ? _new : math.min(trail_short, _new)
+else
+    trail_short := na
+
+eff_sl_l = i_trail and not na(trail_long)  ? math.max(long_sl,  trail_long)  : long_sl
+eff_sl_s = i_trail and not na(trail_short) ? math.min(short_sl, trail_short) : short_sl
+
+// Также выходим при смене структуры против позиции
+exit_long_struct  = strategy.position_size > 0  and bos_bear
+exit_short_struct = strategy.position_size < 0  and bos_bull
+
+if exit_long_struct
+    strategy.close("Long", comment="CHoCH▼")
+if exit_short_struct
+    strategy.close("Short", comment="CHoCH▲")
+
+if strategy.position_size > 0 and not exit_long_struct
+    strategy.exit("Long Exit", "Long",
+        stop=eff_sl_l, limit=long_tp,
+        comment_loss="SL", comment_profit="TP")
+
+if strategy.position_size < 0 and not exit_short_struct
+    strategy.exit("Short Exit", "Short",
+        stop=eff_sl_s, limit=short_tp,
+        comment_loss="SL", comment_profit="TP")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  11. VISUALIZATION
+// ═══════════════════════════════════════════════════════════════════════
+
+// --- EMAs ---
+plot(ema50,  "EMA 50",  color=color.new(color.blue,  30), linewidth=1)
+plot(ema200, "EMA 200", color=color.new(color.red,   20), linewidth=2)
+
+// --- Swing structure lines ---
+var line _sh_line = na
+var line _sl_line = na
+line.delete(_sh_line[1])
+line.delete(_sl_line[1])
+if not na(sh1) and not na(sh1_i)
+    _sh_line := line.new(sh1_i, sh1, bar_index + 3, sh1,
+        color=color.new(color.orange, 40), width=1, style=line.style_dotted)
+if not na(sl1) and not na(sl1_i)
+    _sl_line := line.new(sl1_i, sl1, bar_index + 3, sl1,
+        color=color.new(color.teal,   40), width=1, style=line.style_dotted)
+
+// --- BOS / CHoCH labels ---
+plotshape(choch_bull, "CHoCH▲", shape.labelup,   location.belowbar,
+    color.new(color.lime,  0), text="CHoCH", textcolor=color.white, size=size.small)
+plotshape(choch_bear, "CHoCH▼", shape.labeldown, location.abovebar,
+    color.new(color.red,   0), text="CHoCH", textcolor=color.white, size=size.small)
+plotshape(bos_bull and not choch_bull, "BOS▲", shape.labelup,   location.belowbar,
+    color.new(color.teal,  20), text="BOS",  textcolor=color.white, size=size.tiny)
+plotshape(bos_bear and not choch_bear, "BOS▼", shape.labeldown, location.abovebar,
+    color.new(color.orange,20), text="BOS",  textcolor=color.white, size=size.tiny)
+
+// --- Liquidity sweep markers ---
+plotshape(liq_sweep_bull, "LSW▲", shape.circle, location.belowbar,
+    color.new(color.aqua, 10), size=size.tiny)
+plotshape(liq_sweep_bear, "LSW▼", shape.circle, location.abovebar,
+    color.new(color.fuchsia, 10), size=size.tiny)
+
+// --- Entry signals ---
+plotshape(long_sig,  "Buy",  shape.triangleup,   location.belowbar,
+    color.new(color.lime, 0), size=size.large)
+plotshape(short_sig, "Sell", shape.triangledown, location.abovebar,
+    color.new(color.red,  0), size=size.large)
+
+// --- Order Block boxes ---
+var box _ob_b = na
+var box _ob_s = na
+box.delete(_ob_b[1])
+box.delete(_ob_s[1])
+if ob_b_ok
+    _ob_b := box.new(bar_index - ob_b_age, ob_b_hi, bar_index + 5, ob_b_lo,
+        border_color=color.new(color.lime,   20), border_width=1,
+        bgcolor      =color.new(color.green, 88))
+if ob_s_ok
+    _ob_s := box.new(bar_index - ob_s_age, ob_s_hi, bar_index + 5, ob_s_lo,
+        border_color=color.new(color.red,    20), border_width=1,
+        bgcolor      =color.new(color.red,   88))
+
+// --- FVG shading ---
+var box _fvg_b = na
+var box _fvg_s = na
+box.delete(_fvg_b[1])
+box.delete(_fvg_s[1])
+if fvg_b_ok
+    _fvg_b := box.new(bar_index - fvg_b_age, fvg_b_hi, bar_index + 5, fvg_b_lo,
+        border_color=color.new(color.aqua,   40), border_width=1,
+        bgcolor      =color.new(color.aqua,  93))
+if fvg_s_ok
+    _fvg_s := box.new(bar_index - fvg_s_age, fvg_s_hi, bar_index + 5, fvg_s_lo,
+        border_color=color.new(color.fuchsia,40), border_width=1,
+        bgcolor      =color.new(color.fuchsia,93))
+
+// --- Equilibrium (50%) line ---
+plot(eq_line, "EQ 50%", color=color.new(color.yellow, 50), linewidth=1, style=plot.style_circles)
+
+// --- Previous Day High/Low ---
+plot(prev_day_high, "PDH", color=color.new(color.orange, 50), linewidth=1, style=plot.style_stepline)
+plot(prev_day_low,  "PDL", color=color.new(color.teal,   50), linewidth=1, style=plot.style_stepline)
+
+// --- Active SL/TP lines ---
+var line _l_sl = na
+var line _l_tp = na
+var line _s_sl = na
+var line _s_tp = na
+line.delete(_l_sl[1]), line.delete(_l_tp[1])
+line.delete(_s_sl[1]), line.delete(_s_tp[1])
+
+if strategy.position_size > 0
+    _l_sl := line.new(bar_index-3, eff_sl_l, bar_index+3, eff_sl_l,
+        color=color.new(color.red,  0), width=2, style=line.style_dashed)
+    _l_tp := line.new(bar_index-3, long_tp,  bar_index+3, long_tp,
+        color=color.new(color.lime, 0), width=2, style=line.style_dashed)
+
+if strategy.position_size < 0
+    _s_sl := line.new(bar_index-3, eff_sl_s, bar_index+3, eff_sl_s,
+        color=color.new(color.red,  0), width=2, style=line.style_dashed)
+    _s_tp := line.new(bar_index-3, short_tp, bar_index+3, short_tp,
+        color=color.new(color.lime, 0), width=2, style=line.style_dashed)
+
+// --- Kill zone background ---
+bgcolor(in_london ? color.new(color.blue,   96) :
+        in_ny     ? color.new(color.purple, 96) :
+        in_asia   ? color.new(color.gray,   97) : na, title="Kill Zone BG")
+
+// --- Trend background ---
+bgcolor(trend == 1  ? color.new(color.green, 98) :
+        trend == -1 ? color.new(color.red,   98) : na, title="Trend BG")
+
+// ═══════════════════════════════════════════════════════════════════════
+//  12. DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 15,
+    bgcolor      = color.new(color.black, 52),
+    border_color = color.new(color.gray,  35),
+    border_width = 1,
+    frame_color  = color.new(color.gray,  25),
+    frame_width  = 1)
+
+f2(v) => str.tostring(v, "#.##")
+fp(v) => str.tostring(v, "#.#") + "%"
+fi(v) => str.tostring(math.round(v))
+
+hdr_bg = color.new(#0d1b4b, 10)
+txt_c  = color.new(color.white, 10)
+ok_c   = color.new(color.lime,  10)
+bad_c  = color.new(color.red,   10)
+wrn_c  = color.orange
+
+// v6-safe win/loss tracking
+var int   _w      = 0
+var int   _l      = 0
+var float _prev_c = 0.0
+var float _prev_n = 0.0
+_cc = strategy.closedtrades
+if _cc > _prev_c
+    if strategy.netprofit >= _prev_n
+        _w += 1
+    else
+        _l += 1
+    _prev_n := strategy.netprofit
+_prev_c := _cc
+
+_gp   = strategy.grossprofit
+_gl   = math.abs(strategy.grossloss)
+_pf   = _gl > 0 ? _gp / _gl : (_gp > 0 ? 999.0 : 0.0)
+_wr   = _cc > 0 ? _w / _cc * 100.0 : 0.0
+_np   = strategy.initial_capital > 0 ? strategy.netprofit / strategy.initial_capital * 100.0 : 0.0
+_aww  = _w > 0 ? _gp / _w : 0.0
+_awl  = _l > 0 ? _gl / _l : 0.0
+_rr   = _awl > 0 ? _aww / _awl : 0.0
+
+if barstate.islast
+
+    table.cell(dash, 0, 0, "🏛️ SMC v2.0",
+        bgcolor=hdr_bg, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, syminfo.ticker + " · " + timeframe.period,
+        bgcolor=hdr_bg, text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Profit Factor", text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 1, f2(_pf),
+        text_color=_pf >= 2.5 ? ok_c : _pf >= 1.5 ? wrn_c : bad_c, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Net Profit",    text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 2, fp(_np),         text_color=_np > 0 ? ok_c : bad_c, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Win Rate",      text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 3, fp(_wr),         text_color=_wr >= 50 ? ok_c : wrn_c, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Avg R:R",       text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 4, f2(_rr) + " : 1",
+        text_color=_rr >= 2.0 ? ok_c : _rr >= 1.0 ? wrn_c : bad_c, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Trades",        text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 5, fi(_cc) + "  W:" + fi(_w) + "  L:" + fi(_l),
+        text_color=txt_c, text_size=size.small)
+
+    table.cell(dash, 0, 6, "Max DD",        text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 6, fp(strategy.max_drawdown_percent),
+        text_color=wrn_c, text_size=size.small)
+
+    table.cell(dash, 0, 7, "────────────",  text_color=color.new(color.gray, 50), text_size=size.tiny)
+    table.cell(dash, 1, 7, "────────────",  text_color=color.new(color.gray, 50), text_size=size.tiny)
+
+    _tr_s = trend == 1 ? "📈 БЫЧИЙ" : trend == -1 ? "📉 МЕДВЕЖИЙ" : "⚪ НЕЙТР."
+    _tr_c = trend == 1 ? ok_c : trend == -1 ? bad_c : txt_c
+    table.cell(dash, 0, 8,  "Структура",    text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 8,  _tr_s,          text_color=_tr_c, text_size=size.small)
+
+    table.cell(dash, 0, 9,  "Bullish OB",   text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 9,  ob_b_ok ? "✅ " + f2(ob_b_lo) + "–" + f2(ob_b_hi) : "—",
+        text_color=ob_b_ok ? ok_c : txt_c, text_size=size.small)
+
+    table.cell(dash, 0, 10, "Bearish OB",   text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 10, ob_s_ok ? "✅ " + f2(ob_s_lo) + "–" + f2(ob_s_hi) : "—",
+        text_color=ob_s_ok ? bad_c : txt_c, text_size=size.small)
+
+    table.cell(dash, 0, 11, "Bull FVG",     text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 11, fvg_b_ok ? "✅ " + f2(fvg_b_lo) + "–" + f2(fvg_b_hi) : "—",
+        text_color=fvg_b_ok ? ok_c : txt_c, text_size=size.small)
+
+    _kz_s = kill_zone ? (in_london ? "🟢 London" : "🟣 New York") : "⚪ Closed"
+    table.cell(dash, 0, 12, "Kill Zone",    text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 12, _kz_s,         text_color=kill_zone ? ok_c : txt_c, text_size=size.small)
+
+    table.cell(dash, 0, 13, "PDH/PDL",      text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 13, f2(prev_day_high) + " / " + f2(prev_day_low),
+        text_color=txt_c, text_size=size.small)
+
+    _pos = strategy.position_size > 0 ? "📈 ЛОНГ" : strategy.position_size < 0 ? "📉 ШОРТ" : "⏸ НЕТ"
+    _pc  = strategy.position_size > 0 ? ok_c : strategy.position_size < 0 ? bad_c : txt_c
+    table.cell(dash, 0, 14, "Позиция",      text_color=txt_c, text_size=size.small)
+    table.cell(dash, 1, 14, _pos,           text_color=_pc,  text_size=size.small)
