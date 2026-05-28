@@ -1,0 +1,374 @@
+// This Pine Script® code is subject to the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+
+//@version=6
+strategy(
+     title             = "Breakout + Retest | Стратегия $100 (by Dudukchanov)",
+     shorttitle        = "Breakout $100",
+     overlay           = true,
+     initial_capital   = 100,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.1,
+     slippage          = 2,
+     calc_on_every_tick = false,
+     max_bars_back     = 500)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ══════════════════════════════════════════════════════════════════════════
+
+// Risk & Reward
+riskPct   = input.float(1.0,   "Риск на сделку (%)",       minval=0.1, maxval=10.0, step=0.1, group="💰 Риск / Доходность")
+rrRatio   = input.float(2.0,   "R:R (2R = x2 к стопу)",    minval=1.0, maxval=10.0, step=0.5, group="💰 Риск / Доходность")
+slBuffer  = input.float(0.1,   "Буфер стопа (%)",           minval=0.0, maxval=1.0,  step=0.05, group="💰 Риск / Доходность")
+
+// Levels
+usePDH    = input.bool(true,  "Уровень: Хай предыдущего дня",  group="📊 Ключевые уровни")
+usePDL    = input.bool(true,  "Уровень: Лой предыдущего дня",  group="📊 Ключевые уровни")
+useDayOpen= input.bool(true,  "Уровень: Открытие дня",         group="📊 Ключевые уровни")
+useORB    = input.bool(true,  "Уровень: Opening Range (5 мин)",group="📊 Ключевые уровни")
+orbMins   = input.int(5,      "Минут в Opening Range",         minval=1, maxval=60, group="📊 Ключевые уровни")
+zoneAtr   = input.float(0.3,  "Зона уровня (× ATR)",           minval=0.05, maxval=2.0, step=0.05, group="📊 Ключевые уровни")
+
+// One Candle Rule
+minBodyPct= input.float(60.0, "Мин. тело свечи % (правило свечи)", minval=10.0, maxval=100.0, step=5.0, group="🕯️ Правило одной свечи")
+maxWait   = input.int(10,     "Макс. баров ожидания ретеста",       minval=2,    maxval=50,   group="🕯️ Правило одной свечи")
+
+// Trade Settings
+onceADay  = input.bool(true,  "Одна сделка в день",  group="⚙️ Фильтры")
+dirInput  = input.string("Both", "Направление",
+             options=["Long Only", "Short Only", "Both"], group="⚙️ Фильтры")
+
+// Display
+showLevels= input.bool(true,  "Показывать уровни на графике", group="🎨 Отображение")
+showZone  = input.bool(true,  "Показывать зоны уровней",      group="🎨 Отображение")
+showInfo  = input.bool(true,  "Инфо-панель",                   group="🎨 Отображение")
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ATR
+// ══════════════════════════════════════════════════════════════════════════
+atr14 = ta.atr(14)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  PREVIOUS DAY HIGH / LOW  (без look-ahead bias)
+// ══════════════════════════════════════════════════════════════════════════
+pdH = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_on)
+pdL = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_on)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  TODAY'S OPEN  (первая свеча дня)
+// ══════════════════════════════════════════════════════════════════════════
+isNewDay  = ta.change(time("D")) != 0
+var float dayOpen = na
+
+if isNewDay
+    dayOpen := open
+
+// ══════════════════════════════════════════════════════════════════════════
+//  OPENING RANGE  (высокий/низкий за первые N минут дня)
+// ══════════════════════════════════════════════════════════════════════════
+var float orHigh    = na
+var float orLow     = na
+var bool  orLocked  = false
+var int   dayStartBar = 0
+
+if isNewDay
+    orHigh      := high
+    orLow       := low
+    orLocked    := false
+    dayStartBar := bar_index
+
+if not orLocked
+    barsSinceDayStart = bar_index - dayStartBar
+    minsSinceDayStart = barsSinceDayStart * timeframe.in_seconds() / 60
+    if minsSinceDayStart < orbMins
+        orHigh := math.max(orHigh, high)
+        orLow  := math.min(orLow,  low)
+    else
+        orLocked := true
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ACTIVE LEVELS LIST
+// ══════════════════════════════════════════════════════════════════════════
+//  Collect all active levels into variables (Pine Script doesn't have arrays
+//  as easily modifiable in loops, so we check each one explicitly)
+
+lvlCount = (usePDH ? 1 : 0) + (usePDL ? 1 : 0) +
+           (useDayOpen ? 1 : 0) + (useORB ? 2 : 0)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  BREAKOUT DETECTION
+//  Условие: свеча закрывается ЗА уровнем (close > level или close < level)
+// ══════════════════════════════════════════════════════════════════════════
+zone = atr14 * zoneAtr
+
+// Пробой вверх
+bullBreak_PDH  = usePDH     and close > pdH   and close[1] <= pdH   and not na(pdH)
+bullBreak_ORH  = useORB     and orLocked and close > orHigh and close[1] <= orHigh and not na(orHigh)
+bullBreak_Open = useDayOpen and close > dayOpen and close[1] <= dayOpen and not na(dayOpen)
+
+// Пробой вниз
+bearBreak_PDL  = usePDL     and close < pdL   and close[1] >= pdL   and not na(pdL)
+bearBreak_ORL  = useORB     and orLocked and close < orLow  and close[1] >= orLow  and not na(orLow)
+bearBreak_Open = useDayOpen and close < dayOpen and close[1] >= dayOpen and not na(dayOpen)
+
+anyBullBreak = bullBreak_PDH or bullBreak_ORH or bullBreak_Open
+anyBearBreak = bearBreak_PDL or bearBreak_ORL or bearBreak_Open
+
+// Сохраняем уровень, который был пробит
+brokenLevel(isBull) =>
+    lvl = float(na)
+    if isBull
+        if bullBreak_PDH
+            lvl := pdH
+        else if bullBreak_ORH
+            lvl := orHigh
+        else if bullBreak_Open
+            lvl := dayOpen
+    else
+        if bearBreak_PDL
+            lvl := pdL
+        else if bearBreak_ORL
+            lvl := orLow
+        else if bearBreak_Open
+            lvl := dayOpen
+    lvl
+
+// ══════════════════════════════════════════════════════════════════════════
+//  RETEST STATE MACHINE
+//  0 = нет сигнала
+//  1 = ждём ретест после бычьего пробоя
+// -1 = ждём ретест после медвежьего пробоя
+// ══════════════════════════════════════════════════════════════════════════
+var int   brkState  = 0
+var float brkLevel  = na
+var int   waitBars  = 0
+
+// Активируем состояние ожидания ретеста
+if anyBullBreak and brkState == 0 and strategy.position_size == 0
+    brkState := 1
+    brkLevel := brokenLevel(true)
+    waitBars := 0
+
+if anyBearBreak and brkState == 0 and strategy.position_size == 0
+    brkState := -1
+    brkLevel := brokenLevel(false)
+    waitBars := 0
+
+// Увеличиваем счётчик ожидания
+if brkState != 0
+    waitBars += 1
+
+// Таймаут — сбрасываем, если ретест не случился вовремя
+if waitBars > maxWait
+    brkState := 0
+    brkLevel := na
+    waitBars := 0
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ПРАВИЛО ОДНОЙ СВЕЧИ  (сильная свеча = подтверждение)
+// ══════════════════════════════════════════════════════════════════════════
+candleBody  = math.abs(close - open)
+candleRange = high - low
+bodyRatio   = candleRange > 0 ? (candleBody / candleRange) * 100 : 0.0
+
+strongBull = close > open and bodyRatio >= minBodyPct
+strongBear = close < open and bodyRatio >= minBodyPct
+
+// ══════════════════════════════════════════════════════════════════════════
+//  РЕТЕСТ  (цена вернулась к уровню и оттолкнулась)
+// ══════════════════════════════════════════════════════════════════════════
+retestZone = atr14 * zoneAtr * 1.5
+
+retestBull = brkState ==  1 and not na(brkLevel) and
+             low  <= brkLevel + retestZone and  // коснулась уровня
+             close > brkLevel and               // закрылась выше
+             strongBull                          // сильная бычья свеча
+
+retestBear = brkState == -1 and not na(brkLevel) and
+             high >= brkLevel - retestZone and  // коснулась уровня
+             close < brkLevel and               // закрылась ниже
+             strongBear                          // сильная медвежья свеча
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ОДНА СДЕЛКА В ДЕНЬ
+// ══════════════════════════════════════════════════════════════════════════
+var int lastTradeDate = 0
+currDate = year * 10000 + month * 100 + dayofmonth
+dayOk    = not onceADay or (currDate != lastTradeDate)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  УСЛОВИЯ ВХОДА
+// ══════════════════════════════════════════════════════════════════════════
+longOk  = dirInput == "Long Only"  or dirInput == "Both"
+shortOk = dirInput == "Short Only" or dirInput == "Both"
+
+inNoPos = strategy.position_size == 0
+
+goLong  = retestBull and dayOk and longOk  and inNoPos
+goShort = retestBear and dayOk and shortOk and inNoPos
+
+// ══════════════════════════════════════════════════════════════════════════
+//  РАСЧЁТ РАЗМЕРА ПОЗИЦИИ  (риск % от депозита)
+//  qty = (equity × risk%) / (entry - SL)
+// ══════════════════════════════════════════════════════════════════════════
+bufPts  = close * slBuffer / 100
+
+slLong  = low  - bufPts           // стоп под свечой + буфер
+slShort = high + bufPts           // стоп над свечой + буфер
+
+slDistL = math.max(close - slLong,  syminfo.mintick)
+slDistS = math.max(slShort - close, syminfo.mintick)
+
+qtyLong  = (strategy.equity * riskPct / 100) / slDistL
+qtyShort = (strategy.equity * riskPct / 100) / slDistS
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ВХОДЫ
+// ══════════════════════════════════════════════════════════════════════════
+var float activeSL = na
+var float activeTP = na
+
+if goLong
+    strategy.entry("Long", strategy.long, qty=qtyLong, comment="📈 ВХОД ЛОНГ")
+    activeSL      := slLong
+    activeTP      := close + slDistL * rrRatio
+    lastTradeDate := currDate
+    brkState      := 0
+    brkLevel      := na
+    waitBars      := 0
+
+if goShort
+    strategy.entry("Short", strategy.short, qty=qtyShort, comment="📉 ВХОД ШОРТ")
+    activeSL      := slShort
+    activeTP      := close - slDistS * rrRatio
+    lastTradeDate := currDate
+    brkState      := 0
+    brkLevel      := na
+    waitBars      := 0
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ВЫХОДЫ  (TP + SL одним ордером)
+// ══════════════════════════════════════════════════════════════════════════
+if strategy.position_size > 0 and not na(activeSL)
+    strategy.exit("Long TP/SL", from_entry="Long",
+                  stop=activeSL, limit=activeTP, comment_profit="✅ TP", comment_loss="❌ SL")
+
+if strategy.position_size < 0 and not na(activeSL)
+    strategy.exit("Short TP/SL", from_entry="Short",
+                  stop=activeSL, limit=activeTP, comment_profit="✅ TP", comment_loss="❌ SL")
+
+if strategy.position_size == 0 and not goLong and not goShort
+    activeSL := na
+    activeTP := na
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ВИЗУАЛИЗАЦИЯ УРОВНЕЙ
+// ══════════════════════════════════════════════════════════════════════════
+pdhColor  = color.new(color.red,    40)
+pdlColor  = color.new(color.green,  40)
+openColor = color.new(color.blue,   40)
+orbHColor = color.new(color.purple, 40)
+orbLColor = color.new(color.teal,   40)
+zoneColor = color.new(color.yellow, 88)
+
+// Линии уровней
+plot(showLevels and usePDH     ? pdH    : na, "PDH (Хай пред. дня)",   color=pdhColor,  linewidth=1, style=plot.style_linebr)
+plot(showLevels and usePDL     ? pdL    : na, "PDL (Лой пред. дня)",   color=pdlColor,  linewidth=1, style=plot.style_linebr)
+plot(showLevels and useDayOpen ? dayOpen: na, "Открытие дня",          color=openColor, linewidth=1, style=plot.style_linebr, linestyle=plot.style_dashed)
+plot(showLevels and useORB and orLocked ? orHigh : na, "ORB High",     color=orbHColor, linewidth=1, style=plot.style_linebr)
+plot(showLevels and useORB and orLocked ? orLow  : na, "ORB Low",      color=orbLColor, linewidth=1, style=plot.style_linebr)
+
+// Зоны уровней
+pdh_top  = usePDH  ? pdH  + zone : na
+pdh_bot  = usePDH  ? pdH  - zone : na
+pdl_top  = usePDL  ? pdL  + zone : na
+pdl_bot  = usePDL  ? pdL  - zone : na
+
+// ══════════════════════════════════════════════════════════════════════════
+//  СИГНАЛЫ НА ГРАФИКЕ
+// ══════════════════════════════════════════════════════════════════════════
+// Пробой (маленькие маркеры)
+plotshape(anyBullBreak, "Бычий пробой",  shape.triangleup,   location.belowbar,
+          color=color.new(color.aqua, 20), size=size.tiny, title="▲ Пробой вверх")
+plotshape(anyBearBreak, "Медвежий пробой", shape.triangledown, location.abovebar,
+          color=color.new(color.orange, 20), size=size.tiny, title="▼ Пробой вниз")
+
+// Вход (большие метки)
+plotshape(goLong,  "BUY",  shape.labelup,   location.belowbar,
+          color=color.new(color.lime, 0),
+          text="BUY", textcolor=color.black, size=size.normal)
+plotshape(goShort, "SELL", shape.labeldown, location.abovebar,
+          color=color.new(color.red, 0),
+          text="SELL", textcolor=color.white, size=size.normal)
+
+// SL и TP линии для открытой позиции
+plot(strategy.position_size != 0 and not na(activeSL) ? activeSL : na,
+     "Стоп-лосс", color=color.new(color.red, 0),   linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size != 0 and not na(activeTP) ? activeTP : na,
+     "Тейк-профит", color=color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+
+// Фон: ожидание ретеста
+bgcolor(brkState ==  1 ? color.new(color.blue,   92) :
+        brkState == -1 ? color.new(color.orange, 92) : na,
+        title="Ожидание ретеста")
+
+// ══════════════════════════════════════════════════════════════════════════
+//  ИНФО-ПАНЕЛЬ
+// ══════════════════════════════════════════════════════════════════════════
+if showInfo and barstate.islast
+    var table infoTable = table.new(position.top_right, 2, 8,
+         bgcolor=color.new(color.black, 80),
+         border_color=color.new(color.gray, 50),
+         border_width=1, frame_color=color.new(color.gray, 30), frame_width=1)
+
+    posStr  = strategy.position_size > 0 ? "🟢 ЛОНГ" :
+              strategy.position_size < 0 ? "🔴 ШОРТ" : "⚪ Нет"
+    stateStr = brkState ==  1 ? "⏳ Ждём ретест ↑ (" + str.tostring(waitBars) + " баров)" :
+               brkState == -1 ? "⏳ Ждём ретест ↓ (" + str.tostring(waitBars) + " баров)" :
+               "— Без сигнала"
+
+    netPnl   = strategy.netprofit
+    winCount = strategy.wintrades
+    lossCount= strategy.losstrades
+    totalTr  = strategy.closedtrades
+    winRate  = totalTr > 0 ? (winCount / totalTr) * 100 : 0.0
+
+    table.cell(infoTable, 0, 0, "📊 Стратегия $100 | Dudukchanov",  text_color=color.white,  bgcolor=color.new(color.navy, 60), text_size=size.small)
+    table.cell(infoTable, 1, 0, "Пробой + Ретест + 1 Свеча",        text_color=color.silver, bgcolor=color.new(color.navy, 60), text_size=size.small)
+
+    table.cell(infoTable, 0, 1, "Позиция:",    text_color=color.silver, text_size=size.small)
+    table.cell(infoTable, 1, 1, posStr,         text_color=color.white,  text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "Статус:",      text_color=color.silver, text_size=size.small)
+    table.cell(infoTable, 1, 2, stateStr,        text_color=color.yellow, text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "Риск/сделка:", text_color=color.silver, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(riskPct, "#.#") + "% → R:R " + str.tostring(rrRatio, "#.#"),
+               text_color=color.white, text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "Сделок всего:", text_color=color.silver, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(totalTr),
+               text_color=color.white, text_size=size.small)
+
+    table.cell(infoTable, 0, 5, "Винрейт:",     text_color=color.silver, text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(winRate, "#.##") + "%",
+               text_color=winRate >= 50 ? color.lime : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 6, "Профит:",       text_color=color.silver, text_size=size.small)
+    table.cell(infoTable, 1, 6, str.tostring(netPnl, "#.##"),
+               text_color=netPnl >= 0 ? color.lime : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 7, "Депозит сейчас:", text_color=color.silver, text_size=size.small)
+    table.cell(infoTable, 1, 7, "$ " + str.tostring(strategy.equity, "#.##"),
+               text_color=color.white, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  АЛЕРТЫ
+// ══════════════════════════════════════════════════════════════════════════
+alertcondition(goLong,       "BUY Signal",        "📈 ВХОД ЛОНГ — Пробой + Ретест + Сильная свеча")
+alertcondition(goShort,      "SELL Signal",       "📉 ВХОД ШОРТ — Пробой + Ретест + Сильная свеча")
+alertcondition(anyBullBreak, "Bullish Breakout",  "⚡ Бычий пробой уровня — ждём ретест")
+alertcondition(anyBearBreak, "Bearish Breakout",  "⚡ Медвежий пробой уровня — ждём ретест")
