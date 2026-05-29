@@ -277,7 +277,7 @@ zoneColor = color.new(color.yellow, 88)
 // Линии уровней
 plot(showLevels and usePDH     ? pdH    : na, "PDH (Хай пред. дня)",   color=pdhColor,  linewidth=1, style=plot.style_linebr)
 plot(showLevels and usePDL     ? pdL    : na, "PDL (Лой пред. дня)",   color=pdlColor,  linewidth=1, style=plot.style_linebr)
-plot(showLevels and useDayOpen ? dayOpen: na, "Открытие дня",          color=openColor, linewidth=1, style=plot.style_linebr, linestyle=plot.style_dashed)
+plot(showLevels and useDayOpen ? dayOpen: na, "Открытие дня",          color=openColor, linewidth=1, style=plot.style_linebr)
 plot(showLevels and useORB and orLocked ? orHigh : na, "ORB High",     color=orbHColor, linewidth=1, style=plot.style_linebr)
 plot(showLevels and useORB and orLocked ? orLow  : na, "ORB Low",      color=orbLColor, linewidth=1, style=plot.style_linebr)
 
@@ -292,9 +292,9 @@ pdl_bot  = usePDL  ? pdL  - zone : na
 // ══════════════════════════════════════════════════════════════════════════
 // Пробой (маленькие маркеры)
 plotshape(anyBullBreak, "Бычий пробой",  shape.triangleup,   location.belowbar,
-          color=color.new(color.aqua, 20), size=size.tiny, title="▲ Пробой вверх")
+          color=color.new(color.aqua, 20), size=size.tiny)
 plotshape(anyBearBreak, "Медвежий пробой", shape.triangledown, location.abovebar,
-          color=color.new(color.orange, 20), size=size.tiny, title="▼ Пробой вниз")
+          color=color.new(color.orange, 20), size=size.tiny)
 
 // Вход (большие метки)
 plotshape(goLong,  "BUY",  shape.labelup,   location.belowbar,
