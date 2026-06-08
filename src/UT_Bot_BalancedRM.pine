@@ -1,4 +1,4 @@
-//@version=4
+//@version=5
 strategy(
     title             = "UT Bot + Balanced Risk Management",
     overlay           = true,
@@ -11,39 +11,34 @@ strategy(
 )
 
 // ══════════════════════════════════════════════════════════════════
-//  UT BOT CORE — оригинальная логика сигналов, БЕЗ ИЗМЕНЕНИЙ
+//  UT BOT CORE -- original signal logic, UNCHANGED
 // ══════════════════════════════════════════════════════════════════
-a = input(1,     title = "Key Value (sensitivity)")
-c = input(10,    title = "ATR Period")
-h = input(false, title = "Heikin Ashi Candles")
+a = input.int(1,     title = "Key Value (sensitivity)")
+c = input.int(10,    title = "ATR Period")
+h = input.bool(false, title = "Heikin Ashi Candles")
 
-xATR  = atr(c)
+xATR  = ta.atr(c)
 nLoss = a * xATR
-src   = h ? security(heikinashi(syminfo.tickerid), timeframe.period, close, lookahead = false) : close
+src   = h ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close,
+             lookahead = barmerge.lookahead_off) : close
 
-xATRTrailingStop = 0.0
-xATRTrailingStop := iff(
-    src > nz(xATRTrailingStop[1], 0) and src[1] > nz(xATRTrailingStop[1], 0),
-    max(nz(xATRTrailingStop[1]), src - nLoss),
-    iff(
-        src < nz(xATRTrailingStop[1], 0) and src[1] < nz(xATRTrailingStop[1], 0),
-        min(nz(xATRTrailingStop[1]), src + nLoss),
-        iff(src > nz(xATRTrailingStop[1], 0), src - nLoss, src + nLoss)
-    )
-)
+var float xATRTrailingStop = 0.0
+xATRTrailingStop :=
+    src > nz(xATRTrailingStop[1], 0) and src[1] > nz(xATRTrailingStop[1], 0) ?
+        math.max(nz(xATRTrailingStop[1]), src - nLoss) :
+    src < nz(xATRTrailingStop[1], 0) and src[1] < nz(xATRTrailingStop[1], 0) ?
+        math.min(nz(xATRTrailingStop[1]), src + nLoss) :
+    src > nz(xATRTrailingStop[1], 0) ? src - nLoss : src + nLoss
 
-pos = 0
-pos := iff(
-    src[1] < nz(xATRTrailingStop[1], 0) and src > nz(xATRTrailingStop[1], 0),  1,
-    iff(
-        src[1] > nz(xATRTrailingStop[1], 0) and src < nz(xATRTrailingStop[1], 0), -1,
-        nz(pos[1], 0)
-    )
-)
+var int pos = 0
+pos :=
+    src[1] < nz(xATRTrailingStop[1], 0) and src > nz(xATRTrailingStop[1], 0) ?  1 :
+    src[1] > nz(xATRTrailingStop[1], 0) and src < nz(xATRTrailingStop[1], 0) ? -1 :
+    nz(pos[1], 0)
 
-ema1  = ema(src, 1)
-above = crossover(ema1, xATRTrailingStop)
-below = crossover(xATRTrailingStop, ema1)
+ema1  = ta.ema(src, 1)
+above = ta.crossover(ema1, xATRTrailingStop)
+below = ta.crossover(xATRTrailingStop, ema1)
 
 buy  = src > xATRTrailingStop and above
 sell = src < xATRTrailingStop and below
@@ -51,37 +46,36 @@ sell = src < xATRTrailingStop and below
 // ══════════════════════════════════════════════════════════════════
 //  RISK MANAGEMENT INPUTS
 // ══════════════════════════════════════════════════════════════════
-grpRM  = "⚙ Risk Management"
-grpFlt = "🔍 Filters"
+grpRM  = "Risk Management"
+grpFlt = "Filters"
 
-riskPct      = input(1.0,  title = "Risk per trade (%)",             step = 0.1, group = grpRM)
-rrRatio      = input(2.0,  title = "R:R ratio  (TP2 = entry ± N×R)", step = 0.1, group = grpRM)
-usePartial   = input(true, title = "Partial exit 50% at 1R (TP1)",               group = grpRM)
-useBreakeven = input(true, title = "Move SL → breakeven after TP1",              group = grpRM)
+riskPct      = input.float(1.0,  title = "Risk per trade (%)",          step = 0.1, group = grpRM)
+rrRatio      = input.float(2.0,  title = "R:R Ratio (TP2)",             step = 0.1, group = grpRM)
+usePartial   = input.bool(true,  title = "50% exit at 1R (TP1)",                    group = grpRM)
+useBreakeven = input.bool(true,  title = "Move SL to breakeven after TP1",          group = grpRM)
 
-useTrendF = input(true, title = "EMA trend filter (longs above / shorts below)", group = grpFlt)
-trendLen  = input(200,  title = "Trend EMA length",                              group = grpFlt)
+useTrendF = input.bool(true, title = "EMA trend filter (longs above / shorts below)", group = grpFlt)
+trendLen  = input.int(200,   title = "Trend EMA length",                              group = grpFlt)
 
 // ══════════════════════════════════════════════════════════════════
 //  FILTERS & POSITION SIZING
 // ══════════════════════════════════════════════════════════════════
-trendEma    = ema(close, trendLen)
+trendEma    = ta.ema(close, trendLen)
 longFilter  = not useTrendF or close > trendEma
 shortFilter = not useTrendF or close < trendEma
 
-// Risk-based qty: risk fixed $ per trade regardless of ATR size
 riskAmt = strategy.equity * riskPct / 100
 qty     = nLoss > 0 ? riskAmt / nLoss : 1.0
 
 // ══════════════════════════════════════════════════════════════════
 //  POSITION STATE  (var = persists across bars)
 // ══════════════════════════════════════════════════════════════════
-var float entryP   = na   // entry price snapshot
-var float curSL    = na   // dynamic stop (ATR → breakeven)
-var float tp1      = na   // first target  = 1R
-var float tp2      = na   // second target = N×R
-var float initQty  = na   // qty at entry (for partial detection)
-var bool  tp1Done  = false
+var float entryP  = na   // entry price snapshot
+var float curSL   = na   // dynamic stop (ATR-based, may move to breakeven)
+var float tp1     = na   // first target  = 1R
+var float tp2     = na   // second target = N*R
+var float initQty = na   // qty at entry (used for partial fill detection)
+var bool  tp1Done = false
 
 // ══════════════════════════════════════════════════════════════════
 //  ENTRIES
@@ -94,7 +88,7 @@ if buy and longFilter and strategy.position_size == 0
     initQty := qty
     tp1Done := false
     strategy.entry("Long", strategy.long, qty = qty)
-    alert("UT Bot LONG @ " + tostring(close), alert.freq_once_per_bar)
+    alert("UT Bot LONG @ " + str.tostring(close), alert.freq_once_per_bar)
 
 if sell and shortFilter and strategy.position_size == 0
     entryP  := close
@@ -104,7 +98,7 @@ if sell and shortFilter and strategy.position_size == 0
     initQty := qty
     tp1Done := false
     strategy.entry("Short", strategy.short, qty = qty)
-    alert("UT Bot SHORT @ " + tostring(close), alert.freq_once_per_bar)
+    alert("UT Bot SHORT @ " + str.tostring(close), alert.freq_once_per_bar)
 
 // ══════════════════════════════════════════════════════════════════
 //  IN-TRADE MANAGEMENT  (re-evaluated every bar)
@@ -112,25 +106,22 @@ if sell and shortFilter and strategy.position_size == 0
 
 // ── LONG ─────────────────────────────────────────────────────────
 if strategy.position_size > 0
-
-    // Detect TP1 fill: position size dropped to ≤60% of entry qty
+    // Detect TP1 fill: position dropped to <= 60% of entry qty
     if not tp1Done and initQty > 0 and strategy.position_size <= initQty * 0.60
         tp1Done := true
         if useBreakeven
-            curSL := entryP   // lock in breakeven
+            curSL := entryP
 
     if usePartial and not tp1Done
-        // Phase 1 — before TP1: partial exit at 1R, full-size stop below
         strategy.exit("Long TP1",  "Long", qty_percent = 50, limit = tp1)
         strategy.exit("Long Main", "Long", stop = curSL,     limit = tp2)
     else
-        // Phase 2 — after TP1 (or no partial mode): remainder exits at TP2 with updated stop
         strategy.cancel("Long TP1")
         strategy.exit("Long Main", "Long", stop = curSL, limit = tp2)
 
 // ── SHORT ────────────────────────────────────────────────────────
 if strategy.position_size < 0
-    absPos = abs(strategy.position_size)
+    absPos = math.abs(strategy.position_size)
 
     if not tp1Done and initQty > 0 and absPos <= initQty * 0.60
         tp1Done := true
@@ -144,7 +135,7 @@ if strategy.position_size < 0
         strategy.cancel("Short TP1")
         strategy.exit("Short Main", "Short", stop = curSL, limit = tp2)
 
-// Reset state only when a position actually closes (was open last bar)
+// Reset state only when position actually closes (was open last bar, flat now)
 if strategy.position_size == 0 and strategy.position_size[1] != 0
     entryP  := na
     curSL   := na
@@ -160,20 +151,18 @@ xcolor = pos == -1 ? color.red : pos == 1 ? color.green : color.blue
 plot(xATRTrailingStop, color = xcolor, linewidth = 2, title = "ATR Trailing Stop")
 plot(useTrendF ? trendEma : na, color = color.new(color.orange, 20), linewidth = 1, title = "Trend EMA")
 
-// Filtered signals shown as grey × so trader sees what was skipped
-plotshape(buy  and longFilter,      title = "Buy",          text = 'Buy',  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, transp = 0, size = size.tiny)
-plotshape(sell and shortFilter,     title = "Sell",         text = 'Sell', style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, transp = 0, size = size.tiny)
-plotshape(buy  and not longFilter,  title = "Buy (blocked)",  text = 'x', style = shape.xcross, location = location.belowbar, color = color.gray, size = size.tiny)
-plotshape(sell and not shortFilter, title = "Sell (blocked)", text = 'x', style = shape.xcross, location = location.abovebar, color = color.gray, size = size.tiny)
+plotshape(buy  and longFilter,      title = "Buy",          text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.tiny)
+plotshape(sell and shortFilter,     title = "Sell",         text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.tiny)
+plotshape(buy  and not longFilter,  title = "Buy blocked",  text = "x",   style = shape.xcross,    location = location.belowbar, color = color.gray,  size = size.tiny)
+plotshape(sell and not shortFilter, title = "Sell blocked", text = "x",   style = shape.xcross,    location = location.abovebar, color = color.gray,  size = size.tiny)
 
 barcolor(src > xATRTrailingStop ? color.green : na)
 barcolor(src < xATRTrailingStop ? color.red   : na)
 
-// Live SL / TP levels on chart
 inPos = strategy.position_size != 0
-plot(inPos             ? curSL : na, style = plot.style_linebr, color = color.red,                       linewidth = 1, title = "Stop Loss")
-plot(inPos and not tp1Done ? tp1 : na, style = plot.style_linebr, color = color.new(color.lime, 40),    linewidth = 1, title = "TP1 (1R)")
-plot(inPos             ? tp2   : na, style = plot.style_linebr, color = color.lime,                      linewidth = 1, title = "TP2 target")
+plot(inPos                 ? curSL : na, style = plot.style_linebr, color = color.red,                  linewidth = 1, title = "Stop Loss")
+plot(inPos and not tp1Done ? tp1   : na, style = plot.style_linebr, color = color.new(color.lime, 40), linewidth = 1, title = "TP1 (1R)")
+plot(inPos                 ? tp2   : na, style = plot.style_linebr, color = color.lime,                 linewidth = 1, title = "TP2 target")
 
 // ══════════════════════════════════════════════════════════════════
 //  PERFORMANCE DASHBOARD  (top-right corner)
@@ -184,28 +173,28 @@ if barstate.islast
     table.cell(dash, 1, 0, "",            bgcolor = color.new(color.blue, 50), text_color = color.white, text_size = size.normal)
 
     table.cell(dash, 0, 1, "Equity",        text_color = color.silver, text_size = size.small)
-    table.cell(dash, 1, 1, "$" + tostring(strategy.equity, "#.0"), text_color = color.yellow, text_size = size.small)
+    table.cell(dash, 1, 1, "$" + str.tostring(strategy.equity, "#.0"), text_color = color.yellow, text_size = size.small)
 
     table.cell(dash, 0, 2, "Net P&L",       text_color = color.silver, text_size = size.small)
-    npnl   = strategy.netprofit
-    npnlCl = npnl >= 0 ? color.lime : color.red
-    table.cell(dash, 1, 2, (npnl >= 0 ? "+" : "") + "$" + tostring(npnl, "#.0"), text_color = npnlCl, text_size = size.small)
+    float npnl = strategy.netprofit
+    color npnlCl = npnl >= 0 ? color.lime : color.red
+    table.cell(dash, 1, 2, (npnl >= 0 ? "+" : "") + "$" + str.tostring(npnl, "#.0"), text_color = npnlCl, text_size = size.small)
 
     table.cell(dash, 0, 3, "Win Rate",      text_color = color.silver, text_size = size.small)
-    wr = strategy.closedtrades > 0 ? strategy.wintrades * 100.0 / strategy.closedtrades : 0.0
-    table.cell(dash, 1, 3, tostring(wr, "#.0") + "%", text_color = color.yellow, text_size = size.small)
+    float wr = strategy.closedtrades > 0 ? strategy.wintrades * 100.0 / strategy.closedtrades : 0.0
+    table.cell(dash, 1, 3, str.tostring(wr, "#.0") + "%", text_color = color.yellow, text_size = size.small)
 
     table.cell(dash, 0, 4, "Profit Factor", text_color = color.silver, text_size = size.small)
-    gl   = strategy.grossloss != 0 ? abs(strategy.grossloss) : 1.0
-    pf   = strategy.grossprofit / gl
-    pfCl = pf >= 1.5 ? color.lime : pf >= 1.0 ? color.orange : color.red
-    table.cell(dash, 1, 4, tostring(pf, "#.00"), text_color = pfCl, text_size = size.small)
+    float gl   = strategy.grossloss != 0 ? math.abs(strategy.grossloss) : 1.0
+    float pf   = strategy.grossprofit / gl
+    color pfCl = pf >= 1.5 ? color.lime : pf >= 1.0 ? color.orange : color.red
+    table.cell(dash, 1, 4, str.tostring(pf, "#.00"), text_color = pfCl, text_size = size.small)
 
     table.cell(dash, 0, 5, "Max DD",        text_color = color.silver, text_size = size.small)
-    table.cell(dash, 1, 5, tostring(strategy.max_drawdown_percent, "#.1") + "%", text_color = color.red, text_size = size.small)
+    table.cell(dash, 1, 5, str.tostring(strategy.max_drawdown_percent, "#.1") + "%", text_color = color.red, text_size = size.small)
 
     table.cell(dash, 0, 6, "Trades",        text_color = color.silver, text_size = size.small)
-    table.cell(dash, 1, 6, tostring(strategy.closedtrades), text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 6, str.tostring(strategy.closedtrades), text_color = color.white, text_size = size.small)
 
-    table.cell(dash, 0, 7, "Risk/trade",    text_color = color.silver, text_size = size.small)
-    table.cell(dash, 1, 7, tostring(riskPct) + "% | " + tostring(rrRatio) + "R", text_color = color.aqua, text_size = size.small)
+    table.cell(dash, 0, 7, "Risk / RR",     text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 7, str.tostring(riskPct) + "% / " + str.tostring(rrRatio) + "R", text_color = color.aqua, text_size = size.small)
