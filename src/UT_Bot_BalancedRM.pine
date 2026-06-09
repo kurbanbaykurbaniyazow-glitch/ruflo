@@ -1,6 +1,6 @@
 //@version=6
 strategy(
-    title             = "UT Bot Strategy",
+    title             = "UT Bot + Risk Management",
     overlay           = true,
     default_qty_type  = strategy.fixed,
     default_qty_value = 1,
@@ -52,62 +52,108 @@ buy  = src > xATRTrailingStop and above
 sell = src < xATRTrailingStop and below
 
 // ══════════════════════════════════════════════════════════════════
-//  INPUTS
+//  RISK MANAGEMENT INPUT
 // ══════════════════════════════════════════════════════════════════
-grpRM  = "Risk Management"
-grpFlt = "Filters"
-
-riskPct   = input.float(1.0, title = "Risk per trade (%)", step = 0.1, group = grpRM)
-useTrendF = input.bool(true, title = "EMA trend filter",               group = grpFlt)
-trendLen  = input.int(200,   title = "Trend EMA length",               group = grpFlt)
+riskPct = input.float(1.0, title = "Risk per trade (%)", step = 0.1, group = "Risk Management")
 
 // ══════════════════════════════════════════════════════════════════
-//  FILTERS & SIZING
+//  POSITION SIZING
+//  SL distance = nLoss * 0.5  →  qty = riskAmt / (nLoss * 0.5)
 // ══════════════════════════════════════════════════════════════════
-trendEma    = ta.ema(close, trendLen)
-longFilter  = not useTrendF or close > trendEma
-shortFilter = not useTrendF or close < trendEma
-
 riskAmt = strategy.equity * riskPct / 100.0
-qty     = nLoss > 0 ? riskAmt / nLoss : na
+qty     = nLoss > 0 ? riskAmt / (nLoss * 0.5) : na
 
 // ══════════════════════════════════════════════════════════════════
-//  ENTRIES
-//  Buy signal  → enter Long  (auto-closes Short if open)
-//  Sell signal → enter Short (auto-closes Long  if open)
+//  POSITION STATE
 // ══════════════════════════════════════════════════════════════════
-if buy and longFilter and not na(qty)
+var float entryP   = na   // entry price
+var float curSL    = na   // current stop level
+var float stopDist = na   // nLoss*0.5 captured at entry (fixed)
+var bool  trailOn  = false
+
+bool entryLong  = buy  and not na(qty)
+bool entryShort = sell and not na(qty)
+bool noNewEntry = not entryLong and not entryShort
+
+// ══════════════════════════════════════════════════════════════════
+//  ENTRIES — every signal fires; opposite entry auto-closes position
+// ══════════════════════════════════════════════════════════════════
+if entryLong
+    entryP   := close
+    stopDist := nLoss * 0.5          // lock SL distance at entry ATR
+    curSL    := close - stopDist     // initial SL = entry - 0.5 ATR
+    trailOn  := false
     strategy.entry("Long", strategy.long, qty = qty)
     alert("UT Bot LONG @ " + str.tostring(close), alert.freq_once_per_bar)
 
-if sell and shortFilter and not na(qty)
+if entryShort
+    entryP   := close
+    stopDist := nLoss * 0.5
+    curSL    := close + stopDist     // initial SL = entry + 0.5 ATR
+    trailOn  := false
     strategy.entry("Short", strategy.short, qty = qty)
     alert("UT Bot SHORT @ " + str.tostring(close), alert.freq_once_per_bar)
+
+// ══════════════════════════════════════════════════════════════════
+//  IN-TRADE MANAGEMENT (skipped on entry bars)
+//
+//  LONG:
+//    Phase 1 — flat SL:  curSL = entry - stopDist  (below entry)
+//    Phase 2 — activate: when high >= entry + stopDist
+//                        curSL jumps to entry + stopDist*0.5 (+0.25 ATR profit locked)
+//    Phase 3 — trailing: curSL = max(curSL, close - stopDist)
+//
+//  SHORT: mirror logic
+// ══════════════════════════════════════════════════════════════════
+if noNewEntry
+    if strategy.position_size > 0
+        if not trailOn and high >= entryP + stopDist
+            trailOn := true
+            curSL   := math.max(curSL, entryP + stopDist * 0.5)
+        if trailOn
+            curSL := math.max(curSL, close - stopDist)
+        strategy.exit("Long Exit", "Long", stop = curSL, comment = "SL")
+
+    if strategy.position_size < 0
+        if not trailOn and low <= entryP - stopDist
+            trailOn := true
+            curSL   := math.min(curSL, entryP - stopDist * 0.5)
+        if trailOn
+            curSL := math.min(curSL, close + stopDist)
+        strategy.exit("Short Exit", "Short", stop = curSL, comment = "SL")
+
+// Reset after clean close (not on reversal bar)
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and noNewEntry
+    entryP   := na
+    curSL    := na
+    stopDist := na
+    trailOn  := false
 
 // ══════════════════════════════════════════════════════════════════
 //  VISUALS
 // ══════════════════════════════════════════════════════════════════
 xcolor = pos == -1 ? color.red : pos == 1 ? color.green : color.blue
-
 plot(xATRTrailingStop, color = xcolor, linewidth = 2, title = "ATR Trailing Stop")
-plot(useTrendF ? trendEma : na, color = color.new(color.orange, 20), linewidth = 1, title = "Trend EMA")
 
-// barstate.isconfirmed — сигналы фиксируются только на закрытых барах
-plotshape(buy  and longFilter  and barstate.isconfirmed, title = "Buy",          text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.tiny)
-plotshape(sell and shortFilter and barstate.isconfirmed, title = "Sell",         text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.tiny)
-plotshape(buy  and not longFilter  and barstate.isconfirmed, title = "Buy blocked",  text = "x", style = shape.xcross, location = location.belowbar, color = color.gray,  size = size.tiny)
-plotshape(sell and not shortFilter and barstate.isconfirmed, title = "Sell blocked", text = "x", style = shape.xcross, location = location.abovebar, color = color.gray,  size = size.tiny)
+// Signals fixed to closed bars only — no real-time flicker, no blocked x markers
+plotshape(buy  and barstate.isconfirmed, title = "Buy",  text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.tiny)
+plotshape(sell and barstate.isconfirmed, title = "Sell", text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.tiny)
 
 barcolor(src > xATRTrailingStop ? color.green : na)
 barcolor(src < xATRTrailingStop ? color.red   : na)
+
+// Stop loss line: red = flat initial SL, lime = trailing active (profit locked)
+bool  inPos   = strategy.position_size != 0
+color slColor = trailOn ? color.lime : color.red
+plot(inPos ? curSL : na, style = plot.style_linebr, color = slColor, linewidth = 1, title = "Stop Loss")
 
 // ══════════════════════════════════════════════════════════════════
 //  PERFORMANCE DASHBOARD
 // ══════════════════════════════════════════════════════════════════
 var table dash = table.new(position.top_right, 2, 7, bgcolor = color.new(color.black, 70), border_width = 1)
 if barstate.islast
-    table.cell(dash, 0, 0, "UT BOT", bgcolor = color.new(color.blue, 50), text_color = color.white, text_size = size.normal)
-    table.cell(dash, 1, 0, "",       bgcolor = color.new(color.blue, 50), text_color = color.white, text_size = size.normal)
+    table.cell(dash, 0, 0, "UT BOT + RM", bgcolor = color.new(color.blue, 50), text_color = color.white, text_size = size.normal)
+    table.cell(dash, 1, 0, "",            bgcolor = color.new(color.blue, 50), text_color = color.white, text_size = size.normal)
 
     table.cell(dash, 0, 1, "Equity",        text_color = color.silver, text_size = size.small)
     table.cell(dash, 1, 1, "$" + str.tostring(strategy.equity, "#.0"), text_color = color.yellow, text_size = size.small)
