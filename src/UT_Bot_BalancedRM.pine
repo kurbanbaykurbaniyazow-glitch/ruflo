@@ -65,7 +65,9 @@ float slMult = 0.5
 //  POSITION SIZING  — risk = qty * stopDist = riskAmt exactly
 // ══════════════════════════════════════════════════════════════════
 riskAmt = strategy.equity * riskPct / 100.0
-qty     = nLoss > 0 ? riskAmt / (nLoss * slMult) : na
+rawQty  = nLoss > 0 ? riskAmt / (nLoss * slMult) : na
+maxQty  = close > 0 ? strategy.equity / close : na
+qty     = not na(rawQty) and not na(maxQty) ? math.min(rawQty, maxQty) : na
 
 // ══════════════════════════════════════════════════════════════════
 //  POSITION STATE
