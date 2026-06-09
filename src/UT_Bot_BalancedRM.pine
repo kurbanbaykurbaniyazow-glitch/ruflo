@@ -44,9 +44,9 @@ else if src[1] > prevTS and src < prevTS
 else
     nz(pos[1], 0)
 
-ema1  = ta.ema(src, 1)
-above = ta.crossover(ema1, xATRTrailingStop)
-below = ta.crossover(xATRTrailingStop, ema1)
+// ta.ema(src, 1) == src exactly (alpha=1.0); use src directly
+above = ta.crossover(src, xATRTrailingStop)
+below = ta.crossover(xATRTrailingStop, src)
 
 buy  = src > xATRTrailingStop and above
 sell = src < xATRTrailingStop and below
@@ -56,19 +56,22 @@ sell = src < xATRTrailingStop and below
 // ══════════════════════════════════════════════════════════════════
 riskPct = input.float(1.0, title = "Risk per trade (%)", step = 0.1, group = "Risk Management")
 
+// SL multiplier: stop distance = nLoss * slMult
+// Using 0.5 means stop = half-ATR; same multiplier for all phases
+float slMult = 0.5
+
 // ══════════════════════════════════════════════════════════════════
-//  POSITION SIZING
-//  SL distance = nLoss * 0.5  →  qty = riskAmt / (nLoss * 0.5)
+//  POSITION SIZING  — risk = qty * stopDist = riskAmt exactly
 // ══════════════════════════════════════════════════════════════════
 riskAmt = strategy.equity * riskPct / 100.0
-qty     = nLoss > 0 ? riskAmt / (nLoss * 0.5) : na
+qty     = nLoss > 0 ? riskAmt / (nLoss * slMult) : na
 
 // ══════════════════════════════════════════════════════════════════
 //  POSITION STATE
 // ══════════════════════════════════════════════════════════════════
-var float entryP   = na   // entry price
-var float curSL    = na   // current stop level
-var float stopDist = na   // nLoss*0.5 captured at entry (fixed)
+var float entryP   = na
+var float curSL    = na
+var float stopDist = na
 var bool  trailOn  = false
 
 bool entryLong  = buy  and not na(qty)
@@ -76,40 +79,43 @@ bool entryShort = sell and not na(qty)
 bool noNewEntry = not entryLong and not entryShort
 
 // ══════════════════════════════════════════════════════════════════
-//  ENTRIES — every signal fires; opposite entry auto-closes position
+//  ENTRIES
+//  strategy.exit is registered on the SAME bar as strategy.entry
+//  so the stop order exists from the very first bar of the trade.
 // ══════════════════════════════════════════════════════════════════
 if entryLong
     entryP   := close
-    stopDist := nLoss * 0.5          // lock SL distance at entry ATR
-    curSL    := close - stopDist     // initial SL = entry - 0.5 ATR
+    stopDist := nLoss * slMult
+    curSL    := close - stopDist
     trailOn  := false
     strategy.entry("Long", strategy.long, qty = qty)
+    strategy.exit("Long Exit", "Long", stop = curSL, comment = "SL")
     alert("UT Bot LONG @ " + str.tostring(close), alert.freq_once_per_bar)
 
 if entryShort
     entryP   := close
-    stopDist := nLoss * 0.5
-    curSL    := close + stopDist     // initial SL = entry + 0.5 ATR
+    stopDist := nLoss * slMult
+    curSL    := close + stopDist
     trailOn  := false
     strategy.entry("Short", strategy.short, qty = qty)
+    strategy.exit("Short Exit", "Short", stop = curSL, comment = "SL")
     alert("UT Bot SHORT @ " + str.tostring(close), alert.freq_once_per_bar)
 
 // ══════════════════════════════════════════════════════════════════
-//  IN-TRADE MANAGEMENT (skipped on entry bars)
+//  IN-TRADE MANAGEMENT (skipped on entry bars via noNewEntry)
 //
-//  LONG:
-//    Phase 1 — flat SL:  curSL = entry - stopDist  (below entry)
-//    Phase 2 — activate: when high >= entry + stopDist
-//                        curSL jumps to entry + stopDist*0.5 (+0.25 ATR profit locked)
-//    Phase 3 — trailing: curSL = max(curSL, close - stopDist)
+//  LONG phases:
+//    1 — flat SL at entry - stopDist
+//    2 — when high >= entry + stopDist: lock profit → curSL = entry + stopDist*slMult
+//    3 — trailing: curSL trails close at stopDist below
 //
-//  SHORT: mirror logic
+//  SHORT: mirror
 // ══════════════════════════════════════════════════════════════════
 if noNewEntry
     if strategy.position_size > 0
         if not trailOn and high >= entryP + stopDist
             trailOn := true
-            curSL   := math.max(curSL, entryP + stopDist * 0.5)
+            curSL   := entryP + stopDist * slMult   // lock +0.25 ATR profit
         if trailOn
             curSL := math.max(curSL, close - stopDist)
         strategy.exit("Long Exit", "Long", stop = curSL, comment = "SL")
@@ -117,12 +123,12 @@ if noNewEntry
     if strategy.position_size < 0
         if not trailOn and low <= entryP - stopDist
             trailOn := true
-            curSL   := math.min(curSL, entryP - stopDist * 0.5)
+            curSL   := entryP - stopDist * slMult   // lock +0.25 ATR profit
         if trailOn
             curSL := math.min(curSL, close + stopDist)
         strategy.exit("Short Exit", "Short", stop = curSL, comment = "SL")
 
-// Reset after clean close (not on reversal bar)
+// Reset on clean close (not reversal bar)
 if strategy.position_size == 0 and strategy.position_size[1] != 0 and noNewEntry
     entryP   := na
     curSL    := na
@@ -135,14 +141,14 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0 and noNewEntry
 xcolor = pos == -1 ? color.red : pos == 1 ? color.green : color.blue
 plot(xATRTrailingStop, color = xcolor, linewidth = 2, title = "ATR Trailing Stop")
 
-// Signals fixed to closed bars only — no real-time flicker, no blocked x markers
+// barstate.isconfirmed — signals locked to closed bars, zero real-time flicker
 plotshape(buy  and barstate.isconfirmed, title = "Buy",  text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.tiny)
 plotshape(sell and barstate.isconfirmed, title = "Sell", text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.tiny)
 
 barcolor(src > xATRTrailingStop ? color.green : na)
 barcolor(src < xATRTrailingStop ? color.red   : na)
 
-// Stop loss line: red = flat initial SL, lime = trailing active (profit locked)
+// SL line: red = initial flat stop, lime = trailing active (profit locked)
 bool  inPos   = strategy.position_size != 0
 color slColor = trailOn ? color.lime : color.red
 plot(inPos ? curSL : na, style = plot.style_linebr, color = slColor, linewidth = 1, title = "Stop Loss")
