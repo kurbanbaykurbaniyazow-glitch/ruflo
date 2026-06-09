@@ -74,6 +74,79 @@ buy  = src > xATRTrailingStop and above
 sell = src < xATRTrailingStop and below
 
 // ══════════════════════════════════════════════════════════════════
+//  MULTI-TIMEFRAME FILTER
+//  Each TF checks UT Bot direction on the higher TF (HTF) and the
+//  lower TF (LTF) using the corresponding key values.
+//  Example on 4H: HTF = 1D (key a_1d), LTF = 1H (key a_1h).
+//  Long entry only when HTF + LTF are both bullish (src > TS).
+// ══════════════════════════════════════════════════════════════════
+useMTF = input.bool(true, title = "Enable MTF filter (HTF + LTF)", group = "Multi-TF Filter")
+
+// Computes UT Bot direction on any TF via request.security()
+f_ut_dir(int a_key, int atr_p) =>
+    nL_ = a_key * ta.atr(atr_p)
+    var float ts_ = 0.0
+    p_  = nz(ts_[1])
+    n_  = if close > p_ and close[1] > p_
+        math.max(p_, close - nL_)
+    else if close < p_ and close[1] < p_
+        math.min(p_, close + nL_)
+    else if close > p_
+        close - nL_
+    else
+        close + nL_
+    ts_ := na(n_) ? p_ : n_
+    [close > ts_, close < ts_]
+
+// Higher and lower TF strings (constant for the chart session)
+string htf = if tf_secs <= 1800     // 15M / 30M → HTF: 1H
+    "60"
+else if tf_secs <= 3600             // 1H → HTF: 4H
+    "240"
+else if tf_secs <= 14400            // 4H → HTF: 1D
+    "D"
+else if tf_secs <= 86400            // 1D → HTF: 1W
+    "W"
+else
+    "M"
+
+string ltf = if tf_secs <= 900      // 15M → LTF: 5M
+    "5"
+else if tf_secs <= 1800             // 30M → LTF: 15M
+    "15"
+else if tf_secs <= 3600             // 1H  → LTF: 15M
+    "15"
+else if tf_secs <= 14400            // 4H  → LTF: 1H
+    "60"
+else if tf_secs <= 86400            // 1D  → LTF: 4H
+    "240"
+else
+    "D"
+
+// Key values assigned to HTF and LTF
+int a_htf = if tf_secs <= 3600      // 15M/30M/1H → HTF uses 4H key
+    a_4h
+else if tf_secs <= 14400            // 4H → HTF uses 1D key
+    a_1d
+else
+    a_def
+
+int a_ltf = if tf_secs <= 3600      // 15M/30M/1H → LTF uses 15M key
+    a_15m
+else if tf_secs <= 14400            // 4H → LTF uses 1H key
+    a_1h
+else if tf_secs <= 86400            // 1D → LTF uses 4H key
+    a_4h
+else
+    a_def
+
+[htf_bull, htf_bear] = request.security(syminfo.tickerid, htf, f_ut_dir(a_htf, c), lookahead = barmerge.lookahead_off)
+[ltf_bull, ltf_bear] = request.security(syminfo.tickerid, ltf, f_ut_dir(a_ltf, c), lookahead = barmerge.lookahead_off)
+
+bool mtf_long  = not useMTF or (htf_bull and ltf_bull)
+bool mtf_short = not useMTF or (htf_bear and ltf_bear)
+
+// ══════════════════════════════════════════════════════════════════
 //  RISK MANAGEMENT INPUT
 // ══════════════════════════════════════════════════════════════════
 riskPct = input.float(1.0, title = "Risk per trade (%)", step = 0.1, group = "Risk Management")
@@ -98,8 +171,8 @@ var float curSL    = na
 var float stopDist = na
 var bool  trailOn  = false
 
-bool entryLong  = buy  and not na(qty)
-bool entryShort = sell and not na(qty)
+bool entryLong  = buy  and not na(qty) and mtf_long
+bool entryShort = sell and not na(qty) and mtf_short
 bool noNewEntry = not entryLong and not entryShort
 
 // ══════════════════════════════════════════════════════════════════
