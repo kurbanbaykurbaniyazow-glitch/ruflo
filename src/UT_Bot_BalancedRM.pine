@@ -22,7 +22,7 @@ nLoss = a * xATR
 src   = h ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close,
              lookahead = barmerge.lookahead_off) : close
 
-// ATR trailing stop — if/else block replaces nested ternary chain (v6 syntax)
+// Trailing stop — if/else block expression (v6 syntax, replaces nested ternary)
 var float xATRTrailingStop = 0.0
 float prevTS = nz(xATRTrailingStop[1], 0.0)
 
@@ -37,7 +37,6 @@ else
 
 xATRTrailingStop := na(newTS) ? prevTS : newTS
 
-// Position direction
 var int pos = 0
 pos := if src[1] < prevTS and src > prevTS
     1
@@ -59,40 +58,49 @@ sell = src < xATRTrailingStop and below
 grpRM  = "Risk Management"
 grpFlt = "Filters"
 
-riskPct      = input.float(1.0,  title = "Risk per trade (%)",            step = 0.1, group = grpRM)
-rrRatio      = input.float(2.0,  title = "R:R Ratio (TP2)",               step = 0.1, group = grpRM)
-usePartial   = input.bool(true,  title = "50% exit at 1R (TP1)",                      group = grpRM)
-useBreakeven = input.bool(true,  title = "Move SL to breakeven at 1R",               group = grpRM)
+riskPct      = input.float(1.0,  title = "Risk per trade (%)",        step = 0.1, group = grpRM)
+rrRatio      = input.float(2.0,  title = "R:R Ratio (TP2)",           step = 0.1, group = grpRM)
+usePartial   = input.bool(true,  title = "50% exit at 1R (TP1)",                  group = grpRM)
+useBreakeven = input.bool(true,  title = "Move SL to breakeven at 1R",            group = grpRM)
 
 useTrendF = input.bool(true, title = "EMA trend filter", group = grpFlt)
 trendLen  = input.int(200,   title = "Trend EMA length", group = grpFlt)
 
 // ══════════════════════════════════════════════════════════════════
-//  FILTERS & POSITION SIZING
+//  FILTERS & SIZING
 // ══════════════════════════════════════════════════════════════════
 trendEma    = ta.ema(close, trendLen)
 longFilter  = not useTrendF or close > trendEma
 shortFilter = not useTrendF or close < trendEma
 
 riskAmt = strategy.equity * riskPct / 100.0
-// Returns na when nLoss is 0 or na — prevents entry with invalid sizing
+// qty = na when nLoss is invalid — entry guard prevents entering with bad sizing
 qty = nLoss > 0 ? riskAmt / nLoss : na
 
 // ══════════════════════════════════════════════════════════════════
 //  POSITION STATE
 // ══════════════════════════════════════════════════════════════════
-var float entryP  = na   // entry price
-var float curSL   = na   // dynamic stop: starts at ATR stop, may move to breakeven
-var float tp1Lvl  = na   // 1R target
-var float tp2Lvl  = na   // N*R target
+var float entryP  = na
+var float curSL   = na
+var float tp1Lvl  = na
+var float tp2Lvl  = na
 var bool  tp1Done = false
 
 // ══════════════════════════════════════════════════════════════════
-//  ENTRIES  (only when flat and qty is valid)
+//  ENTRY FLAGS
+//  NO position_size==0 guard — every valid signal fires an entry.
+//  Signals while in a trade cause REVERSAL (opposite) or RE-ENTRY
+//  (same direction, resets RM at new price). This matches the
+//  original UT Bot behaviour and fills every signal on the chart.
 // ══════════════════════════════════════════════════════════════════
-bool canEnter = not na(qty) and strategy.position_size == 0
+bool entryLong  = buy  and longFilter  and not na(qty)
+bool entryShort = sell and shortFilter and not na(qty)
+bool noNewEntry = not entryLong and not entryShort  // management safety flag
 
-if buy and longFilter and canEnter
+// ══════════════════════════════════════════════════════════════════
+//  ENTRIES
+// ══════════════════════════════════════════════════════════════════
+if entryLong
     entryP  := close
     curSL   := close - nLoss
     tp1Lvl  := close + nLoss
@@ -103,7 +111,7 @@ if buy and longFilter and canEnter
         strategy.exit("Long TP1", "Long", qty_percent = 50, limit = close + nLoss)
     alert("UT Bot LONG @ " + str.tostring(close), alert.freq_once_per_bar)
 
-if sell and shortFilter and canEnter
+if entryShort
     entryP  := close
     curSL   := close + nLoss
     tp1Lvl  := close - nLoss
@@ -115,30 +123,31 @@ if sell and shortFilter and canEnter
     alert("UT Bot SHORT @ " + str.tostring(close), alert.freq_once_per_bar)
 
 // ══════════════════════════════════════════════════════════════════
-//  IN-TRADE MANAGEMENT  (re-evaluated every bar)
+//  IN-TRADE MANAGEMENT
+//  Skipped on entry bars (noNewEntry=false) to avoid state conflicts
+//  when a reversal overwrites state variables mid-bar.
 // ══════════════════════════════════════════════════════════════════
+if noNewEntry
+    // TP1 detection by PRICE TOUCH (works for both usePartial modes)
+    if strategy.position_size > 0 and not tp1Done and high >= tp1Lvl
+        tp1Done := true
+        if useBreakeven
+            curSL := entryP
 
-// TP1 detection by PRICE TOUCH — works correctly whether usePartial is on or off
-// (fixes: usePartial=false + useBreakeven=true was silently broken in previous version)
-if strategy.position_size > 0 and not tp1Done and high >= tp1Lvl
-    tp1Done := true
-    if useBreakeven
-        curSL := entryP
+    if strategy.position_size < 0 and not tp1Done and low <= tp1Lvl
+        tp1Done := true
+        if useBreakeven
+            curSL := entryP
 
-if strategy.position_size < 0 and not tp1Done and low <= tp1Lvl
-    tp1Done := true
-    if useBreakeven
-        curSL := entryP
+    // Re-issue main exit every bar — keeps stop current after breakeven update
+    if strategy.position_size > 0
+        strategy.exit("Long Exit", "Long", stop = curSL, limit = tp2Lvl, comment = "SL/TP2")
 
-// Re-issue main exit every bar so the stop level stays current after breakeven update
-if strategy.position_size > 0
-    strategy.exit("Long Exit", "Long", stop = curSL, limit = tp2Lvl, comment = "SL/TP2")
+    if strategy.position_size < 0
+        strategy.exit("Short Exit", "Short", stop = curSL, limit = tp2Lvl, comment = "SL/TP2")
 
-if strategy.position_size < 0
-    strategy.exit("Short Exit", "Short", stop = curSL, limit = tp2Lvl, comment = "SL/TP2")
-
-// Reset all state when position closes (was open last bar, flat now)
-if strategy.position_size == 0 and strategy.position_size[1] != 0
+// Reset state when position closes cleanly (not on reversal / re-entry bars)
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and noNewEntry
     entryP  := na
     curSL   := na
     tp1Lvl  := na
@@ -153,10 +162,11 @@ xcolor = pos == -1 ? color.red : pos == 1 ? color.green : color.blue
 plot(xATRTrailingStop, color = xcolor, linewidth = 2, title = "ATR Trailing Stop")
 plot(useTrendF ? trendEma : na, color = color.new(color.orange, 20), linewidth = 1, title = "Trend EMA")
 
-plotshape(buy  and longFilter,      title = "Buy",          text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.tiny)
-plotshape(sell and shortFilter,     title = "Sell",         text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.tiny)
-plotshape(buy  and not longFilter,  title = "Buy blocked",  text = "x",   style = shape.xcross,    location = location.belowbar, color = color.gray,  size = size.tiny)
-plotshape(sell and not shortFilter, title = "Sell blocked", text = "x",   style = shape.xcross,    location = location.abovebar, color = color.gray,  size = size.tiny)
+// barstate.isconfirmed — signals only render on CLOSED bars, no real-time flicker
+plotshape(buy  and longFilter  and barstate.isconfirmed, title = "Buy",          text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.tiny)
+plotshape(sell and shortFilter and barstate.isconfirmed, title = "Sell",         text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.tiny)
+plotshape(buy  and not longFilter  and barstate.isconfirmed, title = "Buy blocked",  text = "x", style = shape.xcross, location = location.belowbar, color = color.gray,  size = size.tiny)
+plotshape(sell and not shortFilter and barstate.isconfirmed, title = "Sell blocked", text = "x", style = shape.xcross, location = location.abovebar, color = color.gray,  size = size.tiny)
 
 barcolor(src > xATRTrailingStop ? color.green : na)
 barcolor(src < xATRTrailingStop ? color.red   : na)
@@ -167,7 +177,7 @@ plot(inPos and not tp1Done ? tp1Lvl : na, style = plot.style_linebr, color = col
 plot(inPos                 ? tp2Lvl : na, style = plot.style_linebr, color = color.lime,                 linewidth = 1, title = "TP2 target")
 
 // ══════════════════════════════════════════════════════════════════
-//  PERFORMANCE DASHBOARD  (top-right corner)
+//  PERFORMANCE DASHBOARD
 // ══════════════════════════════════════════════════════════════════
 var table dash = table.new(position.top_right, 2, 8, bgcolor = color.new(color.black, 70), border_width = 1)
 if barstate.islast
@@ -178,7 +188,7 @@ if barstate.islast
     table.cell(dash, 1, 1, "$" + str.tostring(strategy.equity, "#.0"), text_color = color.yellow, text_size = size.small)
 
     table.cell(dash, 0, 2, "Net P&L",       text_color = color.silver, text_size = size.small)
-    float npnl  = strategy.netprofit
+    float npnl   = strategy.netprofit
     color npnlCl = npnl >= 0 ? color.lime : color.red
     table.cell(dash, 1, 2, (npnl >= 0 ? "+" : "") + "$" + str.tostring(npnl, "#.0"), text_color = npnlCl, text_size = size.small)
 
