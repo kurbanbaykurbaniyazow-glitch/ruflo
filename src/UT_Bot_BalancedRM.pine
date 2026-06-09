@@ -1,13 +1,14 @@
 //@version=6
 strategy(
-    title             = "UT Bot + Risk Management",
-    overlay           = true,
-    default_qty_type  = strategy.fixed,
-    default_qty_value = 1,
-    initial_capital   = 10000,
-    currency          = currency.USD,
-    commission_type   = strategy.commission.percent,
-    commission_value  = 0.05
+    title                  = "UT Bot + Risk Management",
+    overlay                = true,
+    default_qty_type       = strategy.fixed,
+    default_qty_value      = 1,
+    initial_capital        = 10000,
+    currency               = currency.USD,
+    commission_type        = strategy.commission.percent,
+    commission_value       = 0.05,
+    process_orders_on_close = true
 )
 
 // ══════════════════════════════════════════════════════════════════
@@ -141,9 +142,9 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0 and noNewEntry
 xcolor = pos == -1 ? color.red : pos == 1 ? color.green : color.blue
 plot(xATRTrailingStop, color = xcolor, linewidth = 2, title = "ATR Trailing Stop")
 
-// barstate.isconfirmed — signals locked to closed bars, zero real-time flicker
-plotshape(buy  and barstate.isconfirmed, title = "Buy",  text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.tiny)
-plotshape(sell and barstate.isconfirmed, title = "Sell", text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.tiny)
+// Labels appear ONLY when strategy.entry actually fires — 1:1 with real trades
+plotshape(entryLong  and barstate.isconfirmed, title = "Buy",  text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.small)
+plotshape(entryShort and barstate.isconfirmed, title = "Sell", text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.small)
 
 barcolor(src > xATRTrailingStop ? color.green : na)
 barcolor(src < xATRTrailingStop ? color.red   : na)
