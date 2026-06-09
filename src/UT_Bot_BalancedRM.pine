@@ -14,9 +14,30 @@ strategy(
 // ══════════════════════════════════════════════════════════════════
 //  UT BOT CORE — original signal logic, UNCHANGED
 // ══════════════════════════════════════════════════════════════════
-a = input.int(1,      title = "Key Value (sensitivity)")
 c = input.int(10,     title = "ATR Period")
 h = input.bool(false, title = "Heikin Ashi Candles")
+
+// Key Value per timeframe — auto-selected based on active chart TF
+a_15m = input.int(1, title = "15M",       minval = 1, group = "Key Value (per TF)", inline = "r1")
+a_30m = input.int(1, title = "30M",       minval = 1, group = "Key Value (per TF)", inline = "r1")
+a_1h  = input.int(1, title = "1H",        minval = 1, group = "Key Value (per TF)", inline = "r2")
+a_4h  = input.int(2, title = "4H",        minval = 1, group = "Key Value (per TF)", inline = "r2")
+a_1d  = input.int(3, title = "1D",        minval = 1, group = "Key Value (per TF)", inline = "r3")
+a_def = input.int(1, title = "Other TFs", minval = 1, group = "Key Value (per TF)", inline = "r3")
+
+int tf_secs = timeframe.in_seconds()
+int a = if tf_secs <= 900
+    a_15m
+else if tf_secs <= 1800
+    a_30m
+else if tf_secs <= 3600
+    a_1h
+else if tf_secs <= 14400
+    a_4h
+else if tf_secs <= 86400
+    a_1d
+else
+    a_def
 
 xATR  = ta.atr(c)
 nLoss = a * xATR
