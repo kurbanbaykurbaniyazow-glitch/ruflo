@@ -127,7 +127,7 @@ bool pmt_bearCond = ta.crossunder(close, pmt_lower)
 var int pmt_trend = 0
 bool pmt_newBull  = pmt_bullCond and pmt_trend != 1
 bool pmt_newBear  = pmt_bearCond and pmt_trend != -1
-pmt_trend := pmt_newBull ? 1 : pmt_newBear ? -1 : nz(pmt_trend[1], 0)
+pmt_trend := pmt_newBull ? 1 : pmt_newBear ? -1 : pmt_trend[1]
 
 // Metrics computed every bar for correct table history
 float pmt_bwSeries  = pmt_upper - pmt_lower
@@ -138,9 +138,10 @@ float pmt_absStr    = math.abs(pmt_stretch)
 float pmt_mSlope    = pmt_base - pmt_base[1]
 float pmt_mAccel    = pmt_mSlope - pmt_mSlope[1]
 
-// Entry filter: Long only when PMT is bullish, Short only when bearish
-bool pmt_long_ok  = not usePMTFilter or pmt_trend == 1
-bool pmt_short_ok = not usePMTFilter or pmt_trend == -1
+// Entry filter: Long allowed unless PMT is bearish; Short allowed unless PMT is bullish.
+// pmt_trend == 0 (neutral / startup) does NOT block entries — PMT has no opinion yet.
+bool pmt_long_ok  = not usePMTFilter or pmt_trend != -1
+bool pmt_short_ok = not usePMTFilter or pmt_trend != 1
 
 // ══════════════════════════════════════════════════════════════════
 //  MULTI-TIMEFRAME FILTER
@@ -152,7 +153,7 @@ useMTF = input.bool(true, title = "Enable MTF filter (HTF + LTF)", group = "Mult
 
 f_ut_dir(int a_key, int atr_p) =>
     nL_ = a_key * ta.atr(atr_p)
-    var float ts_ = 0.0
+    var float ts_ = close
     p_  = nz(ts_[1])
     n_  = if close > p_ and close[1] > p_
         math.max(p_, close - nL_)
@@ -318,7 +319,7 @@ fill(pmt_p2, pmt_cp1, close, pmt_lower,
      pmt_trend == 1 and pmt_look == "Intense" ? color.new(pmt_bull, 80)  : na)
 fill(pmt_p1, pmt_cp2, pmt_upper, close,
      pmt_trend == -1 and pmt_look == "Intense" ? color.new(pmt_bear, 70)  : na,
-     pmt_trend == -1 and pmt_look == "Intense" ? color.new(pmt_bull, 100) : na)
+     pmt_trend == -1 and pmt_look == "Intense" ? color.new(pmt_bear, 100) : na)
 
 pmt_off = pmt_avgDev * 0.25
 if pmt_newBull
