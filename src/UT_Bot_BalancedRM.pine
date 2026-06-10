@@ -127,7 +127,7 @@ bool pmt_bearCond = ta.crossunder(close, pmt_lower)
 var int pmt_trend = 0
 bool pmt_newBull  = pmt_bullCond and pmt_trend != 1
 bool pmt_newBear  = pmt_bearCond and pmt_trend != -1
-pmt_trend := pmt_newBull ? 1 : pmt_newBear ? -1 : pmt_trend[1]
+pmt_trend := pmt_newBull ? 1 : pmt_newBear ? -1 : nz(pmt_trend[1], 0)
 
 // Metrics computed every bar for correct table history
 float pmt_bwSeries  = pmt_upper - pmt_lower
@@ -292,15 +292,15 @@ color pmt_cc = pmt_trend == 1 ? pmt_bull : pmt_trend == -1 ? pmt_bear : pmt_neut
 plotcandle(open, high, low, close, color = pmt_cc, wickcolor = pmt_cc, bordercolor = pmt_cc)
 
 pmt_p1 = plot(pmt_showBands ? pmt_upper : na, "PMT Upper",
-     color = pmt_trend == -1 ? color.new(pmt_bear, 40) : color.new(pmt_bear, 100),
+     color = pmt_trend == -1 ? color.new(pmt_bear, 40) : pmt_trend == 0 ? color.new(pmt_neutral, 50) : color.new(pmt_bear, 100),
      linewidth = pmt_look != "Trail" ? 1 : 3)
 pmt_p2 = plot(pmt_showBands ? pmt_lower : na, "PMT Lower",
-     color = pmt_trend == 1  ? color.new(pmt_bull, 40) : color.new(pmt_bull, 100),
+     color = pmt_trend == 1  ? color.new(pmt_bull, 40) : pmt_trend == 0 ? color.new(pmt_neutral, 50) : color.new(pmt_bull, 100),
      linewidth = pmt_look != "Trail" ? 1 : 3)
 pmt_p3 = plot(pmt_showBands and pmt_look != "Trail" ? pmt_upper + ta.atr(14) : na, "PMT Outer Upper",
-     color = pmt_trend == -1 ? color.new(pmt_bear, 40) : color.new(pmt_bear, 100))
+     color = pmt_trend == -1 ? color.new(pmt_bear, 40) : pmt_trend == 0 ? color.new(pmt_neutral, 60) : color.new(pmt_bear, 100))
 pmt_p4 = plot(pmt_showBands and pmt_look != "Trail" ? pmt_lower - ta.atr(14) : na, "PMT Outer Lower",
-     color = pmt_trend == 1  ? color.new(pmt_bull, 40) : color.new(pmt_bull, 100))
+     color = pmt_trend == 1  ? color.new(pmt_bull, 40) : pmt_trend == 0 ? color.new(pmt_neutral, 60) : color.new(pmt_bull, 100))
 
 fill(pmt_p1, pmt_p3, pmt_upper + ta.atr(14), pmt_upper,
      pmt_trend == -1 ? color.new(pmt_bear, 70) : na,
