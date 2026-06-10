@@ -149,7 +149,11 @@ bool pmt_short_ok = not usePMTFilter or pmt_trend != 1
 //  lower TF (LTF) using the corresponding key values.
 //  Example on 4H: HTF = 1D (key a_1d), LTF = 1H (key a_1h).
 // ══════════════════════════════════════════════════════════════════
-useMTF = input.bool(true, title = "Enable MTF filter (HTF + LTF)", group = "Multi-TF Filter")
+useMTF   = input.bool(true, title = "Enable MTF filter", group = "Multi-TF Filter")
+mtf_mode = input.string("HTF only", "MTF Mode",
+     options  = ["HTF only", "LTF only", "HTF OR LTF", "HTF AND LTF"],
+     tooltip  = "HTF only — торгуем по тренду старшего ТФ (рекомендуется). HTF OR LTF — мягкий фильтр. HTF AND LTF — строгий, мало сигналов.",
+     group    = "Multi-TF Filter")
 
 f_ut_dir(int a_key, int atr_p) =>
     nL_ = a_key * ta.atr(atr_p)
@@ -166,9 +170,8 @@ f_ut_dir(int a_key, int atr_p) =>
     ts_ := na(n_) ? p_ : n_
     [close > ts_, close < ts_]
 
-// Ternary chains ensure Pine infers simple string (required by request.security)
-simple string htf = tf_secs <= 1800 ? "60" : tf_secs <= 3600 ? "240" : tf_secs <= 14400 ? "D" : tf_secs <= 86400 ? "W" : "M"
-simple string ltf = tf_secs <= 900  ? "5"  : tf_secs <= 1800 ? "15"  : tf_secs <= 3600  ? "15" : tf_secs <= 14400 ? "60" : tf_secs <= 86400 ? "240" : "D"
+string htf = tf_secs <= 1800 ? "60" : tf_secs <= 3600 ? "240" : tf_secs <= 14400 ? "D" : tf_secs <= 86400 ? "W" : "M"
+string ltf = tf_secs <= 900  ? "5"  : tf_secs <= 1800 ? "15"  : tf_secs <= 3600  ? "15" : tf_secs <= 14400 ? "60" : tf_secs <= 86400 ? "240" : "D"
 
 int a_htf = if tf_secs <= 3600
     a_4h
@@ -189,8 +192,22 @@ else
 [htf_bull, htf_bear] = request.security(syminfo.tickerid, htf, f_ut_dir(a_htf, c), lookahead = barmerge.lookahead_off)
 [ltf_bull, ltf_bear] = request.security(syminfo.tickerid, ltf, f_ut_dir(a_ltf, c), lookahead = barmerge.lookahead_off)
 
-bool mtf_long  = not useMTF or (htf_bull and ltf_bull)
-bool mtf_short = not useMTF or (htf_bear and ltf_bear)
+bool _htf_l = htf_bull
+bool _ltf_l = ltf_bull
+bool _htf_s = htf_bear
+bool _ltf_s = ltf_bear
+
+bool mtf_long  = not useMTF or (
+     mtf_mode == "HTF only"   ? _htf_l :
+     mtf_mode == "LTF only"   ? _ltf_l :
+     mtf_mode == "HTF OR LTF" ? (_htf_l or  _ltf_l) :
+                                 (_htf_l and _ltf_l))
+
+bool mtf_short = not useMTF or (
+     mtf_mode == "HTF only"   ? _htf_s :
+     mtf_mode == "LTF only"   ? _ltf_s :
+     mtf_mode == "HTF OR LTF" ? (_htf_s or  _ltf_s) :
+                                 (_htf_s and _ltf_s))
 
 // ══════════════════════════════════════════════════════════════════
 //  RISK MANAGEMENT INPUT
