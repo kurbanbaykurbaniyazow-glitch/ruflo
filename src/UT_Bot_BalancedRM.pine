@@ -67,7 +67,6 @@ else if src[1] > prevTS and src < prevTS
 else
     nz(pos[1], 0)
 
-// ta.ema(src, 1) == src exactly (alpha=1.0); use src directly
 above = ta.crossover(src, xATRTrailingStop)
 below = ta.crossover(xATRTrailingStop, src)
 
@@ -75,15 +74,82 @@ buy  = src > xATRTrailingStop and above
 sell = src < xATRTrailingStop and below
 
 // ══════════════════════════════════════════════════════════════════
+//  PRICE MEMORY TREND CORE  (© Uptrick, CC BY-SA 4.0)
+//  Computed here (before entries) so pmt_trend is available as a
+//  filter. Visual output rendered after trade management.
+// ══════════════════════════════════════════════════════════════════
+pmt_grp       = "Price Memory Trend"
+pmt_memStr    = input.float(0.12, "Memory Strength",  step = 0.01, group = pmt_grp)
+pmt_memDec    = input.float(0.96, "Memory Decay",     step = 0.01, group = pmt_grp)
+pmt_devLen    = input.int(34,     "Deviation Length", minval = 5,  group = pmt_grp)
+pmt_bandMul   = input.float(1.6,  "Band Multiplier",  step = 0.1,  group = pmt_grp)
+pmt_palette   = input.string("Default", "Color Palette",
+     options = ["Default","Emerald vs Red","Neon Cyan vs Magenta",
+                "Electric Lime vs Crimson","Ice Blue vs Inferno","Gold vs Violet"],
+     group = pmt_grp)
+pmt_showBands = input.bool(true,   "Show Bands",      group = pmt_grp)
+pmt_look      = input.string("Bands", "Look",
+     options = ["Bands","Trail","Intense"], group = pmt_grp)
+pmt_showTbl   = input.bool(true,   "Show PMT Table",  group = pmt_grp)
+pmt_tblPos    = input.string("Bottom Right", "Table Position",
+     options = ["Top Left","Top Right","Bottom Left","Bottom Right"], group = pmt_grp)
+pmt_tblSzStr  = input.string("Small", "Text Size",
+     options = ["Tiny","Small","Normal","Large"], group = pmt_grp)
+usePMTFilter  = input.bool(true, "Use PMT as entry filter", group = pmt_grp)
+
+color pmt_bull =
+     pmt_palette == "Default"                  ? #00ffea :
+     pmt_palette == "Emerald vs Red"           ? color.rgb(0, 255, 170) :
+     pmt_palette == "Neon Cyan vs Magenta"     ? color.rgb(0, 255, 255) :
+     pmt_palette == "Electric Lime vs Crimson" ? color.rgb(170, 255, 0) :
+     pmt_palette == "Ice Blue vs Inferno"      ? color.rgb(120, 200, 255) :
+                                                 color.rgb(255, 210, 80)
+color pmt_bear =
+     pmt_palette == "Default"                  ? #ff00ff :
+     pmt_palette == "Emerald vs Red"           ? color.rgb(255, 60, 60) :
+     pmt_palette == "Neon Cyan vs Magenta"     ? color.rgb(255, 0, 200) :
+     pmt_palette == "Electric Lime vs Crimson" ? color.rgb(200, 0, 40) :
+     pmt_palette == "Ice Blue vs Inferno"      ? color.rgb(255, 80, 0) :
+                                                 color.rgb(150, 60, 255)
+color pmt_neutral = #85858559
+
+var float pmt_mem = close
+pmt_mem := pmt_mem + (close - pmt_mem) * pmt_memStr
+pmt_mem := pmt_mem * pmt_memDec + close * (1 - pmt_memDec)
+float pmt_base   = pmt_mem
+float pmt_dev    = math.abs(close - pmt_base)
+float pmt_avgDev = ta.ema(pmt_dev, pmt_devLen)
+float pmt_upper  = pmt_base + pmt_avgDev * pmt_bandMul
+float pmt_lower  = pmt_base - pmt_avgDev * pmt_bandMul
+
+bool pmt_bullCond = ta.crossover(close, pmt_upper)
+bool pmt_bearCond = ta.crossunder(close, pmt_lower)
+var int pmt_trend = 0
+bool pmt_newBull  = pmt_bullCond and pmt_trend != 1
+bool pmt_newBear  = pmt_bearCond and pmt_trend != -1
+pmt_trend := pmt_newBull ? 1 : pmt_newBear ? -1 : nz(pmt_trend[1], 0)
+
+// Metrics computed every bar for correct table history
+float pmt_bwSeries  = pmt_upper - pmt_lower
+int   pmt_barsSince = ta.barssince(pmt_newBull or pmt_newBear)
+bool  pmt_isTight   = pmt_bwSeries < ta.ema(pmt_bwSeries, pmt_devLen)
+float pmt_stretch   = pmt_avgDev != 0 ? (close - pmt_base) / pmt_avgDev : 0.0
+float pmt_absStr    = math.abs(pmt_stretch)
+float pmt_mSlope    = pmt_base - pmt_base[1]
+float pmt_mAccel    = pmt_mSlope - pmt_mSlope[1]
+
+// Entry filter: Long only when PMT is bullish, Short only when bearish
+bool pmt_long_ok  = not usePMTFilter or pmt_trend == 1
+bool pmt_short_ok = not usePMTFilter or pmt_trend == -1
+
+// ══════════════════════════════════════════════════════════════════
 //  MULTI-TIMEFRAME FILTER
 //  Each TF checks UT Bot direction on the higher TF (HTF) and the
 //  lower TF (LTF) using the corresponding key values.
 //  Example on 4H: HTF = 1D (key a_1d), LTF = 1H (key a_1h).
-//  Long entry only when HTF + LTF are both bullish (src > TS).
 // ══════════════════════════════════════════════════════════════════
 useMTF = input.bool(true, title = "Enable MTF filter (HTF + LTF)", group = "Multi-TF Filter")
 
-// Computes UT Bot direction on any TF via request.security()
 f_ut_dir(int a_key, int atr_p) =>
     nL_ = a_key * ta.atr(atr_p)
     var float ts_ = 0.0
@@ -99,44 +165,42 @@ f_ut_dir(int a_key, int atr_p) =>
     ts_ := na(n_) ? p_ : n_
     [close > ts_, close < ts_]
 
-// Higher and lower TF strings (constant for the chart session)
-string htf = if tf_secs <= 1800     // 15M / 30M → HTF: 1H
+string htf = if tf_secs <= 1800
     "60"
-else if tf_secs <= 3600             // 1H → HTF: 4H
+else if tf_secs <= 3600
     "240"
-else if tf_secs <= 14400            // 4H → HTF: 1D
+else if tf_secs <= 14400
     "D"
-else if tf_secs <= 86400            // 1D → HTF: 1W
+else if tf_secs <= 86400
     "W"
 else
     "M"
 
-string ltf = if tf_secs <= 900      // 15M → LTF: 5M
+string ltf = if tf_secs <= 900
     "5"
-else if tf_secs <= 1800             // 30M → LTF: 15M
+else if tf_secs <= 1800
     "15"
-else if tf_secs <= 3600             // 1H  → LTF: 15M
+else if tf_secs <= 3600
     "15"
-else if tf_secs <= 14400            // 4H  → LTF: 1H
+else if tf_secs <= 14400
     "60"
-else if tf_secs <= 86400            // 1D  → LTF: 4H
+else if tf_secs <= 86400
     "240"
 else
     "D"
 
-// Key values assigned to HTF and LTF
-int a_htf = if tf_secs <= 3600      // 15M/30M/1H → HTF uses 4H key
+int a_htf = if tf_secs <= 3600
     a_4h
-else if tf_secs <= 14400            // 4H → HTF uses 1D key
+else if tf_secs <= 14400
     a_1d
 else
     a_def
 
-int a_ltf = if tf_secs <= 3600      // 15M/30M/1H → LTF uses 15M key
+int a_ltf = if tf_secs <= 3600
     a_15m
-else if tf_secs <= 14400            // 4H → LTF uses 1H key
+else if tf_secs <= 14400
     a_1h
-else if tf_secs <= 86400            // 1D → LTF uses 4H key
+else if tf_secs <= 86400
     a_4h
 else
     a_def
@@ -151,13 +215,10 @@ bool mtf_short = not useMTF or (htf_bear and ltf_bear)
 //  RISK MANAGEMENT INPUT
 // ══════════════════════════════════════════════════════════════════
 riskPct = input.float(1.0, title = "Risk per trade (%)", step = 0.1, group = "Risk Management")
-
-// SL multiplier: stop distance = nLoss * slMult
-// Using 0.5 means stop = half-ATR; same multiplier for all phases
 float slMult = 0.5
 
 // ══════════════════════════════════════════════════════════════════
-//  POSITION SIZING  — risk = qty * stopDist = riskAmt exactly
+//  POSITION SIZING
 // ══════════════════════════════════════════════════════════════════
 riskAmt = strategy.equity * riskPct / 100.0
 rawQty  = nLoss > 0 ? riskAmt / (nLoss * slMult) : na
@@ -172,14 +233,12 @@ var float curSL    = na
 var float stopDist = na
 var bool  trailOn  = false
 
-bool entryLong  = buy  and not na(qty) and mtf_long
-bool entryShort = sell and not na(qty) and mtf_short
+bool entryLong  = buy  and not na(qty) and mtf_long  and pmt_long_ok
+bool entryShort = sell and not na(qty) and mtf_short and pmt_short_ok
 bool noNewEntry = not entryLong and not entryShort
 
 // ══════════════════════════════════════════════════════════════════
 //  ENTRIES
-//  strategy.exit is registered on the SAME bar as strategy.entry
-//  so the stop order exists from the very first bar of the trade.
 // ══════════════════════════════════════════════════════════════════
 if entryLong
     entryP   := close
@@ -200,20 +259,15 @@ if entryShort
     alert("UT Bot SHORT @ " + str.tostring(close), alert.freq_once_per_bar)
 
 // ══════════════════════════════════════════════════════════════════
-//  IN-TRADE MANAGEMENT (skipped on entry bars via noNewEntry)
-//
-//  LONG phases:
-//    1 — flat SL at entry - stopDist
-//    2 — when high >= entry + stopDist: lock profit → curSL = entry + stopDist*slMult
-//    3 — trailing: curSL trails close at stopDist below
-//
+//  IN-TRADE MANAGEMENT
+//  LONG: SL flat → at +0.5R lock to +0.25R → trail at 0.5 ATR
 //  SHORT: mirror
 // ══════════════════════════════════════════════════════════════════
 if noNewEntry
     if strategy.position_size > 0
         if not trailOn and high >= entryP + stopDist
             trailOn := true
-            curSL   := entryP + stopDist * slMult   // lock +0.25 ATR profit
+            curSL   := entryP + stopDist * slMult
         if trailOn
             curSL := math.max(curSL, close - stopDist)
         strategy.exit("Long Exit", "Long", stop = curSL, comment = "SL")
@@ -221,12 +275,12 @@ if noNewEntry
     if strategy.position_size < 0
         if not trailOn and low <= entryP - stopDist
             trailOn := true
-            curSL   := entryP - stopDist * slMult   // lock +0.25 ATR profit
+            curSL   := entryP - stopDist * slMult
         if trailOn
             curSL := math.min(curSL, close + stopDist)
         strategy.exit("Short Exit", "Short", stop = curSL, comment = "SL")
 
-// Reset on clean close (not reversal bar)
+// Reset on clean close
 if strategy.position_size == 0 and strategy.position_size[1] != 0 and noNewEntry
     entryP   := na
     curSL    := na
@@ -234,75 +288,11 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0 and noNewEntry
     trailOn  := false
 
 // ══════════════════════════════════════════════════════════════════
-//  PRICE MEMORY TREND  (© Uptrick, CC BY-SA 4.0) — independent layer
-//  Runs fully independently. Signals not yet wired to entries.
+//  PRICE MEMORY TREND VISUALS  (© Uptrick, CC BY-SA 4.0)
 // ══════════════════════════════════════════════════════════════════
-pmt_grp      = "Price Memory Trend"
-pmt_memStr   = input.float(0.12, "Memory Strength",  step = 0.01, group = pmt_grp)
-pmt_memDec   = input.float(0.96, "Memory Decay",     step = 0.01, group = pmt_grp)
-pmt_devLen   = input.int(34,     "Deviation Length", minval = 5,  group = pmt_grp)
-pmt_bandMul  = input.float(1.6,  "Band Multiplier",  step = 0.1,  group = pmt_grp)
-pmt_palette  = input.string("Default", "Color Palette",
-     options = ["Default","Emerald vs Red","Neon Cyan vs Magenta",
-                "Electric Lime vs Crimson","Ice Blue vs Inferno","Gold vs Violet"],
-     group = pmt_grp)
-pmt_showBands = input.bool(true, "Show Bands", group = pmt_grp)
-pmt_look      = input.string("Bands", "Look",
-     options = ["Bands","Trail","Intense"], group = pmt_grp)
-pmt_showTbl   = input.bool(true, "Show PMT Table", group = pmt_grp)
-pmt_tblPos    = input.string("Bottom Right", "Table Position",
-     options = ["Top Left","Top Right","Bottom Left","Bottom Right"], group = pmt_grp)
-pmt_tblSzStr  = input.string("Small", "Text Size",
-     options = ["Tiny","Small","Normal","Large"], group = pmt_grp)
-
-color pmt_bull =
-     pmt_palette == "Default"                  ? #00ffea :
-     pmt_palette == "Emerald vs Red"           ? color.rgb(0, 255, 170) :
-     pmt_palette == "Neon Cyan vs Magenta"     ? color.rgb(0, 255, 255) :
-     pmt_palette == "Electric Lime vs Crimson" ? color.rgb(170, 255, 0) :
-     pmt_palette == "Ice Blue vs Inferno"      ? color.rgb(120, 200, 255) :
-                                                 color.rgb(255, 210, 80)
-color pmt_bear =
-     pmt_palette == "Default"                  ? #ff00ff :
-     pmt_palette == "Emerald vs Red"           ? color.rgb(255, 60, 60) :
-     pmt_palette == "Neon Cyan vs Magenta"     ? color.rgb(255, 0, 200) :
-     pmt_palette == "Electric Lime vs Crimson" ? color.rgb(200, 0, 40) :
-     pmt_palette == "Ice Blue vs Inferno"      ? color.rgb(255, 80, 0) :
-                                                 color.rgb(150, 60, 255)
-color pmt_neutral = #85858559
-
-// Price Memory core
-var float pmt_mem = close
-pmt_mem := pmt_mem + (close - pmt_mem) * pmt_memStr
-pmt_mem := pmt_mem * pmt_memDec + close * (1 - pmt_memDec)
-float pmt_base   = pmt_mem
-float pmt_dev    = math.abs(close - pmt_base)
-float pmt_avgDev = ta.ema(pmt_dev, pmt_devLen)
-float pmt_upper  = pmt_base + pmt_avgDev * pmt_bandMul
-float pmt_lower  = pmt_base - pmt_avgDev * pmt_bandMul
-
-// Signal & non-pyramiding trend state
-bool pmt_bullCond = ta.crossover(close, pmt_upper)
-bool pmt_bearCond = ta.crossunder(close, pmt_lower)
-var int pmt_trend = 0
-bool pmt_newBull  = pmt_bullCond and pmt_trend != 1
-bool pmt_newBear  = pmt_bearCond and pmt_trend != -1
-pmt_trend := pmt_newBull ? 1 : pmt_newBear ? -1 : nz(pmt_trend[1], 0)
-
-// Metrics computed every bar (needed for correct history in table)
-float pmt_bwSeries  = pmt_upper - pmt_lower
-int   pmt_barsSince = ta.barssince(pmt_newBull or pmt_newBear)
-bool  pmt_isTight   = pmt_bwSeries < ta.ema(pmt_bwSeries, pmt_devLen)
-float pmt_stretch   = pmt_avgDev != 0 ? (close - pmt_base) / pmt_avgDev : 0.0
-float pmt_absStr    = math.abs(pmt_stretch)
-float pmt_mSlope    = pmt_base - pmt_base[1]
-float pmt_mAccel    = pmt_mSlope - pmt_mSlope[1]
-
-// Candle coloring (PMT colours the bars by trend state)
 color pmt_cc = pmt_trend == 1 ? pmt_bull : pmt_trend == -1 ? pmt_bear : pmt_neutral
 plotcandle(open, high, low, close, color = pmt_cc, wickcolor = pmt_cc, bordercolor = pmt_cc)
 
-// Band plots
 pmt_p1 = plot(pmt_showBands ? pmt_upper : na, "PMT Upper",
      color = pmt_trend == -1 ? color.new(pmt_bear, 40) : color.new(pmt_bear, 100),
      linewidth = pmt_look != "Trail" ? 1 : 3)
@@ -330,7 +320,6 @@ fill(pmt_p1, pmt_cp2, pmt_upper, close,
      pmt_trend == -1 and pmt_look == "Intense" ? color.new(pmt_bear, 70)  : na,
      pmt_trend == -1 and pmt_look == "Intense" ? color.new(pmt_bull, 100) : na)
 
-// Trend-change labels
 pmt_off = pmt_avgDev * 0.25
 if pmt_newBull
     label.new(bar_index, pmt_lower - pmt_off, "Up",
@@ -344,7 +333,6 @@ if pmt_newBear
 alertcondition(pmt_newBull, "PMT Bull", "Price Memory Trend: BULL")
 alertcondition(pmt_newBear, "PMT Bear", "Price Memory Trend: BEAR")
 
-// PMT Info Table
 pmt_tPos = pmt_tblPos == "Top Left"    ? position.top_left    :
            pmt_tblPos == "Top Right"   ? position.top_right   :
            pmt_tblPos == "Bottom Left" ? position.bottom_left :
@@ -391,19 +379,17 @@ if barstate.islast and pmt_showTbl
     table.cell(pmt_tbl, 1,11, pmt_absStr > 1.5 ? "High" : pmt_absStr > 1.2 ? "Good" : pmt_absStr > 0.8 ? "Mid" : pmt_absStr > 0.4 ? "Low" : "Min", text_color = pmt_tCol, text_size = pmt_tSz)
 
 // ══════════════════════════════════════════════════════════════════
-//  VISUALS
+//  UT BOT VISUALS
 // ══════════════════════════════════════════════════════════════════
 xcolor = pos == -1 ? color.red : pos == 1 ? color.green : color.blue
 plot(xATRTrailingStop, color = xcolor, linewidth = 2, title = "ATR Trailing Stop")
 
-// Labels appear ONLY when strategy.entry actually fires — 1:1 with real trades
 plotshape(entryLong  and barstate.isconfirmed, title = "Buy",  text = "Buy",  style = shape.labelup,   location = location.belowbar, color = color.green, textcolor = color.white, size = size.small)
 plotshape(entryShort and barstate.isconfirmed, title = "Sell", text = "Sell", style = shape.labeldown, location = location.abovebar, color = color.red,   textcolor = color.white, size = size.small)
 
 barcolor(src > xATRTrailingStop ? color.green : na)
 barcolor(src < xATRTrailingStop ? color.red   : na)
 
-// SL line: red = initial flat stop, lime = trailing active (profit locked)
 bool  inPos   = strategy.position_size != 0
 color slColor = trailOn ? color.lime : color.red
 plot(inPos ? curSL : na, style = plot.style_linebr, color = slColor, linewidth = 1, title = "Stop Loss")
