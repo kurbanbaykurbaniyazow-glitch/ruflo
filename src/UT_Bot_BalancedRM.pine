@@ -8,7 +8,8 @@ strategy(
     currency               = currency.USD,
     commission_type        = strategy.commission.percent,
     commission_value       = 0.05,
-    process_orders_on_close = true
+    process_orders_on_close = true,
+    max_labels_count       = 500
 )
 
 // ══════════════════════════════════════════════════════════════════
@@ -231,6 +232,163 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0 and noNewEntry
     curSL    := na
     stopDist := na
     trailOn  := false
+
+// ══════════════════════════════════════════════════════════════════
+//  PRICE MEMORY TREND  (© Uptrick, CC BY-SA 4.0) — independent layer
+//  Runs fully independently. Signals not yet wired to entries.
+// ══════════════════════════════════════════════════════════════════
+pmt_grp      = "Price Memory Trend"
+pmt_memStr   = input.float(0.12, "Memory Strength",  step = 0.01, group = pmt_grp)
+pmt_memDec   = input.float(0.96, "Memory Decay",     step = 0.01, group = pmt_grp)
+pmt_devLen   = input.int(34,     "Deviation Length", minval = 5,  group = pmt_grp)
+pmt_bandMul  = input.float(1.6,  "Band Multiplier",  step = 0.1,  group = pmt_grp)
+pmt_palette  = input.string("Default", "Color Palette",
+     options = ["Default","Emerald vs Red","Neon Cyan vs Magenta",
+                "Electric Lime vs Crimson","Ice Blue vs Inferno","Gold vs Violet"],
+     group = pmt_grp)
+pmt_showBands = input.bool(true, "Show Bands", group = pmt_grp)
+pmt_look      = input.string("Bands", "Look",
+     options = ["Bands","Trail","Intense"], group = pmt_grp)
+pmt_showTbl   = input.bool(true, "Show PMT Table", group = pmt_grp)
+pmt_tblPos    = input.string("Bottom Right", "Table Position",
+     options = ["Top Left","Top Right","Bottom Left","Bottom Right"], group = pmt_grp)
+pmt_tblSzStr  = input.string("Small", "Text Size",
+     options = ["Tiny","Small","Normal","Large"], group = pmt_grp)
+
+color pmt_bull =
+     pmt_palette == "Default"                  ? #00ffea :
+     pmt_palette == "Emerald vs Red"           ? color.rgb(0, 255, 170) :
+     pmt_palette == "Neon Cyan vs Magenta"     ? color.rgb(0, 255, 255) :
+     pmt_palette == "Electric Lime vs Crimson" ? color.rgb(170, 255, 0) :
+     pmt_palette == "Ice Blue vs Inferno"      ? color.rgb(120, 200, 255) :
+                                                 color.rgb(255, 210, 80)
+color pmt_bear =
+     pmt_palette == "Default"                  ? #ff00ff :
+     pmt_palette == "Emerald vs Red"           ? color.rgb(255, 60, 60) :
+     pmt_palette == "Neon Cyan vs Magenta"     ? color.rgb(255, 0, 200) :
+     pmt_palette == "Electric Lime vs Crimson" ? color.rgb(200, 0, 40) :
+     pmt_palette == "Ice Blue vs Inferno"      ? color.rgb(255, 80, 0) :
+                                                 color.rgb(150, 60, 255)
+color pmt_neutral = #85858559
+
+// Price Memory core
+var float pmt_mem = close
+pmt_mem := pmt_mem + (close - pmt_mem) * pmt_memStr
+pmt_mem := pmt_mem * pmt_memDec + close * (1 - pmt_memDec)
+float pmt_base   = pmt_mem
+float pmt_dev    = math.abs(close - pmt_base)
+float pmt_avgDev = ta.ema(pmt_dev, pmt_devLen)
+float pmt_upper  = pmt_base + pmt_avgDev * pmt_bandMul
+float pmt_lower  = pmt_base - pmt_avgDev * pmt_bandMul
+
+// Signal & non-pyramiding trend state
+bool pmt_bullCond = ta.crossover(close, pmt_upper)
+bool pmt_bearCond = ta.crossunder(close, pmt_lower)
+var int pmt_trend = 0
+bool pmt_newBull  = pmt_bullCond and pmt_trend != 1
+bool pmt_newBear  = pmt_bearCond and pmt_trend != -1
+pmt_trend := pmt_newBull ? 1 : pmt_newBear ? -1 : nz(pmt_trend[1], 0)
+
+// Metrics computed every bar (needed for correct history in table)
+float pmt_bwSeries  = pmt_upper - pmt_lower
+int   pmt_barsSince = ta.barssince(pmt_newBull or pmt_newBear)
+bool  pmt_isTight   = pmt_bwSeries < ta.ema(pmt_bwSeries, pmt_devLen)
+float pmt_stretch   = pmt_avgDev != 0 ? (close - pmt_base) / pmt_avgDev : 0.0
+float pmt_absStr    = math.abs(pmt_stretch)
+float pmt_mSlope    = pmt_base - pmt_base[1]
+float pmt_mAccel    = pmt_mSlope - pmt_mSlope[1]
+
+// Candle coloring (PMT colours the bars by trend state)
+color pmt_cc = pmt_trend == 1 ? pmt_bull : pmt_trend == -1 ? pmt_bear : pmt_neutral
+plotcandle(open, high, low, close, color = pmt_cc, wickcolor = pmt_cc, bordercolor = pmt_cc)
+
+// Band plots
+pmt_p1 = plot(pmt_showBands ? pmt_upper : na, "PMT Upper",
+     color = pmt_trend == -1 ? color.new(pmt_bear, 40) : color.new(pmt_bear, 100),
+     linewidth = pmt_look != "Trail" ? 1 : 3)
+pmt_p2 = plot(pmt_showBands ? pmt_lower : na, "PMT Lower",
+     color = pmt_trend == 1  ? color.new(pmt_bull, 40) : color.new(pmt_bull, 100),
+     linewidth = pmt_look != "Trail" ? 1 : 3)
+pmt_p3 = plot(pmt_showBands and pmt_look != "Trail" ? pmt_upper + ta.atr(14) : na, "PMT Outer Upper",
+     color = pmt_trend == -1 ? color.new(pmt_bear, 40) : color.new(pmt_bear, 100))
+pmt_p4 = plot(pmt_showBands and pmt_look != "Trail" ? pmt_lower - ta.atr(14) : na, "PMT Outer Lower",
+     color = pmt_trend == 1  ? color.new(pmt_bull, 40) : color.new(pmt_bull, 100))
+
+fill(pmt_p1, pmt_p3, pmt_upper + ta.atr(14), pmt_upper,
+     pmt_trend == -1 ? color.new(pmt_bear, 70) : na,
+     pmt_trend == -1 ? color.new(pmt_bear, 70) : na)
+fill(pmt_p2, pmt_p4, pmt_lower - ta.atr(14), pmt_lower,
+     pmt_trend == 1 ? color.new(pmt_bull, 70) : na,
+     pmt_trend == 1 ? color.new(pmt_bull, 70) : na)
+
+pmt_cp1 = plot(close, color = #363a4500)
+pmt_cp2 = plot(close, color = #363a4500)
+fill(pmt_p2, pmt_cp1, close, pmt_lower,
+     pmt_trend == 1 and pmt_look == "Intense" ? color.new(pmt_bull, 100) : na,
+     pmt_trend == 1 and pmt_look == "Intense" ? color.new(pmt_bull, 80)  : na)
+fill(pmt_p1, pmt_cp2, pmt_upper, close,
+     pmt_trend == -1 and pmt_look == "Intense" ? color.new(pmt_bear, 70)  : na,
+     pmt_trend == -1 and pmt_look == "Intense" ? color.new(pmt_bull, 100) : na)
+
+// Trend-change labels
+pmt_off = pmt_avgDev * 0.25
+if pmt_newBull
+    label.new(bar_index, pmt_lower - pmt_off, "Up",
+         style = label.style_label_up, size = size.normal,
+         color = pmt_bull, textcolor = color.black, force_overlay = true)
+if pmt_newBear
+    label.new(bar_index, pmt_upper + pmt_off, "Down",
+         style = label.style_label_down, size = size.normal,
+         color = pmt_bear, textcolor = color.white, force_overlay = true)
+
+alertcondition(pmt_newBull, "PMT Bull", "Price Memory Trend: BULL")
+alertcondition(pmt_newBear, "PMT Bear", "Price Memory Trend: BEAR")
+
+// PMT Info Table
+pmt_tPos = pmt_tblPos == "Top Left"    ? position.top_left    :
+           pmt_tblPos == "Top Right"   ? position.top_right   :
+           pmt_tblPos == "Bottom Left" ? position.bottom_left :
+                                         position.bottom_right
+pmt_tSz  = pmt_tblSzStr == "Tiny"   ? size.tiny   :
+           pmt_tblSzStr == "Small"  ? size.small  :
+           pmt_tblSzStr == "Normal" ? size.normal :
+                                      size.large
+
+var table pmt_tbl = table.new(pmt_tPos, 2, 12,
+     frame_color = color.new(color.white, 70), frame_width = 1,
+     bgcolor = #000000, border_color = #5b5b5b, border_width = 1)
+
+if barstate.islast and pmt_showTbl
+    float pmt_bwPct  = pmt_base != 0 ? pmt_bwSeries / pmt_base * 100 : 0.0
+    float pmt_posInB = pmt_bwSeries != 0 ? (close - pmt_lower) / pmt_bwSeries : 0.5
+    float pmt_posPct = math.min(math.max(pmt_posInB * 100, 0), 100)
+    color pmt_tCol   = pmt_trend == 1 ? pmt_bull : pmt_trend == -1 ? pmt_bear : color.gray
+    color pmt_sCol   = pmt_absStr >= 1.2 ? pmt_tCol : pmt_absStr >= 0.8 ? color.new(pmt_tCol, 30) : color.gray
+
+    table.cell(pmt_tbl, 0, 0, "PMT", text_color = color.white, text_size = pmt_tSz, bgcolor = color.new(color.black, 70))
+    table.merge_cells(pmt_tbl, 0, 0, 1, 0)
+    table.cell(pmt_tbl, 0, 1, "Trend",       text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 1, pmt_trend == 1 ? "Bull" : pmt_trend == -1 ? "Bear" : "-", text_color = pmt_tCol, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0, 2, "Trend Age",   text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 2, str.tostring(pmt_barsSince) + " bars", text_color = pmt_tCol, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0, 3, "Stretch",     text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 3, str.tostring(pmt_stretch, "#.##") + "x", text_color = pmt_sCol, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0, 4, "Band State",  text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 4, close > pmt_upper ? "Hot" : close < pmt_lower ? "Cool" : "Calm", text_color = pmt_tCol, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0, 5, "Band Width",  text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 5, str.tostring(pmt_bwPct, "#.##") + "%", text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0, 6, "Band Pos",    text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 6, str.tostring(pmt_posPct, "#") + "%", text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0, 7, "Compression", text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 7, pmt_isTight ? "Tight" : "Wide", text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0, 8, "Rev Risk",    text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 8, pmt_absStr > 1.5 ? "Extreme" : pmt_absStr > 1.0 ? "Elevated" : "Neutral", text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0, 9, "Mem Slope",   text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1, 9, str.tostring(pmt_mSlope, format.mintick), text_color = pmt_tCol, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0,10, "Mem Accel",   text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1,10, str.tostring(pmt_mAccel, format.mintick), text_color = pmt_tCol, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 0,11, "Confidence",  text_color = color.white, text_size = pmt_tSz)
+    table.cell(pmt_tbl, 1,11, pmt_absStr > 1.5 ? "High" : pmt_absStr > 1.2 ? "Good" : pmt_absStr > 0.8 ? "Mid" : pmt_absStr > 0.4 ? "Low" : "Min", text_color = pmt_tCol, text_size = pmt_tSz)
 
 // ══════════════════════════════════════════════════════════════════
 //  VISUALS
