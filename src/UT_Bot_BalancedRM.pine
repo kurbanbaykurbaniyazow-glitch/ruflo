@@ -166,29 +166,9 @@ f_ut_dir(int a_key, int atr_p) =>
     ts_ := na(n_) ? p_ : n_
     [close > ts_, close < ts_]
 
-string htf = if tf_secs <= 1800
-    "60"
-else if tf_secs <= 3600
-    "240"
-else if tf_secs <= 14400
-    "D"
-else if tf_secs <= 86400
-    "W"
-else
-    "M"
-
-string ltf = if tf_secs <= 900
-    "5"
-else if tf_secs <= 1800
-    "15"
-else if tf_secs <= 3600
-    "15"
-else if tf_secs <= 14400
-    "60"
-else if tf_secs <= 86400
-    "240"
-else
-    "D"
+// Ternary chains ensure Pine infers simple string (required by request.security)
+simple string htf = tf_secs <= 1800 ? "60" : tf_secs <= 3600 ? "240" : tf_secs <= 14400 ? "D" : tf_secs <= 86400 ? "W" : "M"
+simple string ltf = tf_secs <= 900  ? "5"  : tf_secs <= 1800 ? "15"  : tf_secs <= 3600  ? "15" : tf_secs <= 14400 ? "60" : tf_secs <= 86400 ? "240" : "D"
 
 int a_htf = if tf_secs <= 3600
     a_4h
@@ -268,16 +248,16 @@ if noNewEntry
     if strategy.position_size > 0
         if not trailOn and high >= entryP + stopDist
             trailOn := true
-            curSL   := entryP + stopDist * slMult
-        if trailOn
+            curSL   := entryP + stopDist * slMult   // breakeven lock this bar only
+        else if trailOn
             curSL := math.max(curSL, close - stopDist)
         strategy.exit("Long Exit", "Long", stop = curSL, comment = "SL")
 
     if strategy.position_size < 0
         if not trailOn and low <= entryP - stopDist
             trailOn := true
-            curSL   := entryP - stopDist * slMult
-        if trailOn
+            curSL   := entryP - stopDist * slMult   // breakeven lock this bar only
+        else if trailOn
             curSL := math.min(curSL, close + stopDist)
         strategy.exit("Short Exit", "Short", stop = curSL, comment = "SL")
 
