@@ -1,0 +1,284 @@
+//@version=6
+// ============================================================================
+//  Top-Down SMC/ICT Strategy  (Pine v6)
+//  Валидировано на 2 годах OKX (BTC/ETH/SOL), walk-forward. Подробности:
+//  docs/crypto-volk-strategy-research.md (разделы 6–7).
+//
+//  ЛОГИКА:
+//   • 1D — тренд (биас): daily close[1] > daily EMA(20)  -> лонги, иначе шорты
+//   • Зоны интереса (POI): Order Block + FVG на 1H (нативно) и 4H (security)
+//   • Вход — на 1H: слом структуры (CHoCH/BOS) в сторону тренда + цена в зоне
+//   • 15m — только подтверждение разворота (слом структуры 15m в ту же сторону)
+//   • Выход (input): (A) фикс. RR  ИЛИ  (B) TP1 50% у зоны + БУ + структурный трейл
+//
+//  ⚠ ОЖИДАНИЕ: PF ~1.2–1.25 (НЕ 2.5+). Это честный потолок данных. DD ~35–40% при 5x.
+//  Базовый ТФ графика: 1H.
+//
+//  NOTE: reference-реализация под TradingView. Источник истины по метрикам —
+//  Python-харнесс (topdown_1h.py / topdown_tp.py); Pine не компилировался локально,
+//  возможны мелкие правки синтаксиса в редакторе TradingView. Поведение может слегка
+//  отличаться от бэктеста из-за intrabar-исполнения и отрисовки HTF.
+// ============================================================================
+strategy("Top-Down SMC (1D trend / 1H entry / 15m confirm)", overlay=true,
+     initial_capital=500, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=0, calc_on_every_tick=false, process_orders_on_close=true,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     slippage=2, max_boxes_count=200, max_labels_count=100)
+
+// ----------------------------------------------------------------------------
+// INPUTS
+// ----------------------------------------------------------------------------
+gT="Тренд / структура"
+dEmaLen   = input.int(20, "1D EMA тренда", group=gT)
+swing1h   = input.int(4,  "Свинг 1H (пивот)", group=gT)
+swing15   = input.int(4,  "Свинг 15m (пивот)", group=gT)
+confWin   = input.int(8,  "Окно 15m-подтверждения (баров)", group=gT)
+
+gZ="Зоны (OB/FVG)"
+dispMult  = input.float(1.0, "Импульс зоны (×ATR)", step=0.1, group=gZ)
+zoneLife  = input.int(120, "Жизнь зоны (баров 1H)", group=gZ)
+tagTol    = input.float(0.003, "Допуск касания зоны", step=0.001, group=gZ)
+use4H     = input.bool(true, "Добавлять зоны 4H", group=gZ)
+
+gR="Риск / выход"
+riskPct   = input.float(3.0, "Риск на сделку, %", step=0.5, group=gR)
+maxLev    = input.float(5.0, "Плечо (кэп номинала)", step=0.5, group=gR)
+slBufAtr  = input.float(0.5, "Буфер стопа (×ATR)", step=0.1, group=gR)
+exitMode  = input.string("Структурный трейл", "Режим выхода", options=["Фикс. RR","Структурный трейл"], group=gR)
+rrFix     = input.float(4.0, "RR для фикс. выхода", step=0.5, group=gR)
+tp1MinRR  = input.float(2.0, "TP1: мин. R до зоны", step=0.5, group=gR)
+
+gV="Визуализация"
+showZones = input.bool(true, "Зоны", group=gV)
+showSig   = input.bool(true, "Сигналы", group=gV)
+
+// ----------------------------------------------------------------------------
+// ФУНКЦИИ
+// ----------------------------------------------------------------------------
+// Слом структуры: barssince последнего бычьего/медвежьего слома (для 15m через security)
+f_bs(int len, bool wantUp) =>
+    ph = ta.pivothigh(len, len)
+    pl = ta.pivotlow(len, len)
+    var float lph = na
+    var float lpl = na
+    if not na(ph)
+        lph := ph
+    if not na(pl)
+        lpl := pl
+    up = not na(lph) and close > lph
+    dn = not na(lpl) and close < lpl
+    ta.barssince(wantUp ? up : dn)
+
+// Зона, сформированная на ТЕКУЩЕМ баре: [demTop,demBot,supTop,supBot] (na если нет)
+f_zone(float dm) =>
+    a = ta.atr(14)
+    dDem = close[1] < open[1] and (close - open) > dm*a and close > high[1]   // бычий OB
+    dSup = close[1] > open[1] and (open - close) > dm*a and close < low[1]    // медв. OB
+    fDem = low > high[2]                                                       // бычий FVG
+    fSup = high < low[2]                                                       // медв. FVG
+    demTop = dDem ? high[1] : fDem ? low      : na
+    demBot = dDem ? low[1]  : fDem ? high[2]   : na
+    supTop = dSup ? high[1] : fSup ? low[2]    : na
+    supBot = dSup ? low[1]  : fSup ? high      : na
+    [demTop, demBot, supTop, supBot]
+
+// ----------------------------------------------------------------------------
+// MTF ДАННЫЕ (анти-repaint: lookahead_off)
+// ----------------------------------------------------------------------------
+dBias = request.security(syminfo.tickerid, "1D",
+     (close[1] > ta.ema(close, dEmaLen)[1]) ? 1 : -1, lookahead=barmerge.lookahead_off)
+bsUp15 = request.security(syminfo.tickerid, "15", f_bs(swing15, true),  lookahead=barmerge.lookahead_off)
+bsDn15 = request.security(syminfo.tickerid, "15", f_bs(swing15, false), lookahead=barmerge.lookahead_off)
+[d4Top,d4Bot,s4Top,s4Bot] = request.security(syminfo.tickerid, "240", f_zone(dispMult), lookahead=barmerge.lookahead_off)
+newH4 = ta.change(time("240")) != 0
+
+atr1 = ta.atr(14)
+
+// 1H структура (нативно)
+ph1 = ta.pivothigh(swing1h, swing1h)
+pl1 = ta.pivotlow(swing1h, swing1h)
+var float lph1 = na
+var float lpl1 = na
+if not na(ph1)
+    lph1 := ph1
+if not na(pl1)
+    lpl1 := pl1
+brkUp1 = not na(lph1) and close > lph1
+brkDn1 = not na(lpl1) and close < lpl1
+
+// ----------------------------------------------------------------------------
+// ХРАНИЛИЩЕ ЗОН (demand/supply): top, bot, born_bar
+// ----------------------------------------------------------------------------
+var demTop = array.new<float>()
+var demBot = array.new<float>()
+var demBar = array.new<int>()
+var supTop = array.new<float>()
+var supBot = array.new<float>()
+var supBar = array.new<int>()
+
+f_push(arrT, arrB, arrI, float t, float b) =>
+    if not na(t) and not na(b)
+        array.push(arrT, t)
+        array.push(arrB, b)
+        array.push(arrI, bar_index)
+
+// зоны 1H (каждый бар)
+[d1Top,d1Bot,s1Top,s1Bot] = f_zone(dispMult)
+f_push(demTop, demBot, demBar, d1Top, d1Bot)
+f_push(supTop, supBot, supBar, s1Top, s1Bot)
+// зоны 4H (когда закрылся 4H-бар)
+if use4H and newH4
+    f_push(demTop, demBot, demBar, d4Top, d4Bot)
+    f_push(supTop, supBot, supBar, s4Top, s4Bot)
+
+// чистка: старые (по возрасту) и митигированные (закрытие за зону)
+f_prune(arrT, arrB, arrI, bool isDemand) =>
+    i = 0
+    while i < array.size(arrI)
+        old = (bar_index - array.get(arrI, i)) > zoneLife
+        mit = isDemand ? (close < array.get(arrB, i)) : (close > array.get(arrT, i))
+        if old or mit
+            array.remove(arrT, i)
+            array.remove(arrB, i)
+            array.remove(arrI, i)
+        else
+            i += 1
+f_prune(demTop, demBot, demBar, true)
+f_prune(supTop, supBot, supBar, false)
+
+// ----------------------------------------------------------------------------
+// ПОИСК ЗОН: касание demand/supply на текущем баре; ближайшая противоположная для TP
+// ----------------------------------------------------------------------------
+// касаемая demand-зона (для лонга): low внутри [bot*(1-tol), top]; берём с наибольшим top
+f_tagged(arrT, arrB, bool isDemand) =>
+    float bt = na
+    float bb = na
+    best = isDemand ? -1e18 : 1e18
+    for i = 0 to array.size(arrT) - 1
+        t = array.get(arrT, i)
+        b = array.get(arrB, i)
+        tagged = isDemand ? (low <= t and low >= b*(1-tagTol)) : (high >= b and high <= t*(1+tagTol))
+        if tagged
+            key = isDemand ? t : b
+            if (isDemand and key > best) or (not isDemand and key < best)
+                best := key
+                bt := t
+                bb := b
+    [bt, bb]
+
+// ближайшая противоположная зона выше/ниже цены на >= minDist (граница = ближний край)
+f_target(arrT, arrB, bool above, float price, float minDist) =>
+    float best = na
+    for i = 0 to array.size(arrT) - 1
+        border = above ? array.get(arrB, i) : array.get(arrT, i)   // near edge
+        ok = above ? (border - price >= minDist) : (price - border >= minDist)
+        if ok
+            if na(best) or (above ? border < best : border > best)
+                best := border
+    best
+
+// ----------------------------------------------------------------------------
+// ВХОД
+// ----------------------------------------------------------------------------
+confUp = bsUp15 <= confWin
+confDn = bsDn15 <= confWin
+flat = strategy.position_size == 0
+
+longSig = false
+shortSig = false
+var float ezBot = na
+var float ezTop = na
+if flat and not na(atr1)
+    if dBias == 1 and brkUp1 and confUp
+        [tt, bb] = f_tagged(demTop, demBot, true)
+        if not na(bb)
+            longSig := true
+            ezTop := tt
+            ezBot := bb
+    else if dBias == -1 and brkDn1 and confDn
+        [tt, bb] = f_tagged(supTop, supBot, false)
+        if not na(tt)
+            shortSig := true
+            ezTop := tt
+            ezBot := bb
+
+// расчёт стопа/объёма и постановка ордеров
+var float pEntry = na
+var float pSL = na
+var float pDist = na
+var float pTP1 = na
+var bool  tp1Done = false
+var int   pSide = 0
+
+if longSig
+    e = close
+    sl = ezBot - slBufAtr*atr1
+    dist = e - sl
+    if dist > 0
+        q = math.min(strategy.equity*riskPct/100/dist, strategy.equity*maxLev/e)
+        strategy.entry("L", strategy.long, qty=q)
+        pEntry := e
+        pSL := sl
+        pDist := dist
+        pSide := 1
+        tp1Done := false
+        pTP1 := f_target(supTop, supBot, true, e, dist*tp1MinRR)
+if shortSig
+    e = close
+    sl = ezTop + slBufAtr*atr1
+    dist = sl - e
+    if dist > 0
+        q = math.min(strategy.equity*riskPct/100/dist, strategy.equity*maxLev/e)
+        strategy.entry("S", strategy.short, qty=q)
+        pEntry := e
+        pSL := sl
+        pDist := dist
+        pSide := -1
+        tp1Done := false
+        pTP1 := f_target(demTop, demBot, false, e, dist*tp1MinRR)
+
+// ----------------------------------------------------------------------------
+// ВЫХОД
+// ----------------------------------------------------------------------------
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+if exitMode == "Фикс. RR" and (inLong or inShort)
+    eid = inLong ? "L" : "S"
+    tp = pSide == 1 ? pEntry + rrFix*pDist : pEntry - rrFix*pDist
+    strategy.exit("x", from_entry=eid, stop=pSL, limit=tp)
+
+if exitMode == "Структурный трейл" and (inLong or inShort)
+    eid = inLong ? "L" : "S"
+    // TP1: 50% у ближней противоположной зоны (если найдена)
+    if not tp1Done and not na(pTP1)
+        strategy.exit("tp1", from_entry=eid, qty_percent=50, limit=pTP1)
+        // фиксация флага при достижении TP1
+        if (inLong and high >= pTP1) or (inShort and low <= pTP1)
+            tp1Done := true
+            pSL := pEntry   // безубыток для остатка
+    // структурный трейл остатка: за каждый новый swing low/high 1H
+    if tp1Done
+        if pSide == 1 and not na(lpl1)
+            ns = lpl1 - slBufAtr*atr1
+            pSL := math.max(pSL, ns)
+        if pSide == -1 and not na(lph1)
+            ns = lph1 + slBufAtr*atr1
+            pSL := math.min(pSL, ns)
+    strategy.exit("sl", from_entry=eid, stop=pSL)
+
+// ----------------------------------------------------------------------------
+// ВИЗУАЛИЗАЦИЯ
+// ----------------------------------------------------------------------------
+if showZones and barstate.islast
+    for i = 0 to array.size(demTop) - 1
+        box.new(array.get(demBar,i), array.get(demTop,i), bar_index+3, array.get(demBot,i),
+             border_color=color.new(color.teal,60), bgcolor=color.new(color.teal,85))
+    for i = 0 to array.size(supTop) - 1
+        box.new(array.get(supBar,i), array.get(supTop,i), bar_index+3, array.get(supBot,i),
+             border_color=color.new(color.maroon,60), bgcolor=color.new(color.maroon,85))
+
+plotshape(showSig and longSig,  "Long",  shape.triangleup,   location.belowbar, color.new(color.green,0), size=size.small)
+plotshape(showSig and shortSig, "Short", shape.triangledown, location.abovebar, color.new(color.red,0),   size=size.small)
+bias = dBias == 1 ? color.new(color.green,80) : color.new(color.red,80)
+bgcolor(bias, title="1D биас")
