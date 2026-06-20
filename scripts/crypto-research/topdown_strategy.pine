@@ -210,11 +210,14 @@ var float pTP1 = na
 var bool  tp1Done = false
 var int   pSide = 0
 
+// struct-trail требует валидную TP1-зону (иначе нет тейка и БУ) — как в validated Python
+needTP1 = exitMode == "Структурный трейл"
 if longSig
     e = close
     sl = ezBot - slBufAtr*atr1
     dist = e - sl
-    if dist > 0
+    tp1c = f_target(supTop, supBot, true, e, dist*tp1MinRR)
+    if dist > 0 and (not needTP1 or not na(tp1c))
         q = math.min(strategy.equity*riskPct/100/dist, strategy.equity*maxLev/e)
         strategy.entry("L", strategy.long, qty=q)
         pEntry := e
@@ -222,12 +225,13 @@ if longSig
         pDist := dist
         pSide := 1
         tp1Done := false
-        pTP1 := f_target(supTop, supBot, true, e, dist*tp1MinRR)
+        pTP1 := tp1c
 if shortSig
     e = close
     sl = ezTop + slBufAtr*atr1
     dist = sl - e
-    if dist > 0
+    tp1c = f_target(demTop, demBot, false, e, dist*tp1MinRR)
+    if dist > 0 and (not needTP1 or not na(tp1c))
         q = math.min(strategy.equity*riskPct/100/dist, strategy.equity*maxLev/e)
         strategy.entry("S", strategy.short, qty=q)
         pEntry := e
@@ -235,7 +239,7 @@ if shortSig
         pDist := dist
         pSide := -1
         tp1Done := false
-        pTP1 := f_target(demTop, demBot, false, e, dist*tp1MinRR)
+        pTP1 := tp1c
 
 // ----------------------------------------------------------------------------
 // ВЫХОД
