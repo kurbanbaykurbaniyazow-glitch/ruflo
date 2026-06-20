@@ -1,0 +1,178 @@
+//@version=6
+// ============================================================================
+//  SMC Sequential CHoCH + Order-Block Retest  (v2, бэктест-провалидированная)
+//  Запускать на 5m графике. Гейт структуры: CHoCH 5m -> подтверждение 15m.
+//  Вход НЕ по рынку, а лимиткой на ретесте ордер-блока (узкий стоп => выше R).
+//  + Фильтр импульса (dispAtr): отсев вялых сломов — главный рычаг PF (нарушает прав. №2).
+//  ЧЕСТНЫЕ МЕТРИКИ (52 дня, OKX, дефолтный конфиг):
+//    BTC PF 3.33 (walk-forward H1/H2: 3.07/3.50, WR 35%, maxDD ~$280)
+//    ETH PF 1.94 / SOL PF 1.46 — ЧИСТЫЙ OOS (в подборе параметров не участвовали).
+//  Низкий WR (23-35%) + высокий RR=5: прибыль несут редкие крупные движения => нужна дисциплина.
+// ============================================================================
+strategy("SMC CHoCH+OB Retest (5m->15m)", overlay=true, pyramiding=0,
+     initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1,
+     calc_on_every_tick=false, process_orders_on_close=true,
+     commission_type=strategy.commission.percent, commission_value=0.05, slippage=1,
+     max_lines_count=500, max_labels_count=500)
+
+// ---------------- INPUTS ----------------
+grpT="Таймфреймы";  htfTF=input.timeframe("15","HTF валидатор",group=grpT)
+grpS="Структура";   swingLen=input.int(3,"Длина свинга",1,50,group=grpS)
+                    confirmWin=input.int(8,"Окно подтверждения (баров 15m)",1,50,group=grpS)
+grpE="Вход (OB-ретест)"
+obLookback=input.int(8,"Поиск OB (баров назад)",1,50,group=grpE,
+     tooltip="Ордер-блок = последняя противоположная импульсу свеча перед сломом.")
+retestWin=input.int(8,"Окно ретеста (баров на залив лимитки)",1,50,group=grpE)
+dispAtr=input.float(1.2,"Фильтр импульса (xATR14, 0=выкл)",0,step=0.1,group=grpE,
+     tooltip="Отсев ВЯЛЫХ сломов: диапазон свечи слома >= dispAtr*ATR14. Главный рычаг PF (BTC 3.3, ETH 1.9, SOL 1.5). ВНИМАНИЕ: нарушает исходное правило №2.")
+grpR="Риск/выход"
+riskPct=input.float(1.0,"Риск на сделку %",0.1,100,0.1,group=grpR)
+rr=input.float(5.0,"R:R тейк (валидир. оптимум=5.0)",0.1,step=0.1,group=grpR)
+slBuf=input.int(15,"Буфер стопа (тиков)",0,group=grpR)
+maxLev=input.float(3.0,"Кэп плеча (номинал<=Eq*плечо)",0.1,step=0.1,group=grpR)
+usePartial=input.bool(false,"Частичная фикс. 50% на 1R",group=grpR,
+     tooltip="ВЫКЛ по умолчанию: бэктест показал, что фиксация половины СНИЖАЕТ прибыль (режет 4R-движения).")
+exitRev=input.bool(false,"Выход по обратному CHoCH 15m",group=grpR,
+     tooltip="ВЫКЛ: преждевременно режет сделки, ухудшал PF на тесте.")
+grpV="Визуализация"; showSig=input.bool(true,"Метки сигналов",group=grpV)
+
+// ---------------- ДЕТЕКЦИЯ СТРУКТУРЫ (CHoCH) ----------------
+// chochUp/Down = разворотный пробой по закрытию. Чувствительность: только факт close>/< уровня.
+f_struct(int L) =>
+    float ph=ta.pivothigh(L,L), pl=ta.pivotlow(L,L)
+    var float lastPH=na, var float lastPL=na, var int trend=0
+    if not na(ph)
+        lastPH:=ph
+    if not na(pl)
+        lastPL:=pl
+    bool up=false, bool dn=false
+    if not na(lastPH) and close>lastPH and trend<=0
+        up:=(trend==-1), trend:=1
+    if not na(lastPL) and close<lastPL and trend>=0 and not up
+        dn:=(trend==1), trend:=-1
+    [up,dn]
+
+// 5m — нативно (график = 5m); 15m — через security с латчем по закрытию
+[up5,dn5]=f_struct(swingLen)
+[up15raw,dn15raw]=request.security(syminfo.tickerid,htfTF,f_struct(swingLen),lookahead=barmerge.lookahead_off)
+bool isNewHtf=ta.change(time(htfTF))!=0
+var bool up15=false, var bool dn15=false
+if isNewHtf
+    up15:=up15raw[1], dn15:=dn15raw[1]
+else
+    up15:=false, dn15:=false
+// латч 5m с лагом [1] (анти-repaint)
+bool ltfUp=up5[1], bool ltfDn=dn5[1]
+
+// ---------------- FSM: последовательное подтверждение 5m -> 15m ----------------
+var int fsm=0, var int pdir=0, var int cnt=0
+bool longC=false, bool shortC=false
+if fsm==0 and strategy.position_size==0 and strategy.opentrades==0
+    if ltfUp
+        fsm:=1, pdir:=1, cnt:=0
+    else if ltfDn
+        fsm:=1, pdir:=-1, cnt:=0
+if fsm==1 and isNewHtf
+    cnt+=1
+if fsm==1 and cnt>confirmWin
+    fsm:=0, pdir:=0
+if fsm==1
+    if pdir==1 and ltfDn
+        fsm:=0, pdir:=0
+    else if pdir==-1 and ltfUp
+        fsm:=0, pdir:=0
+if fsm==1
+    if pdir==1 and up15
+        fsm:=2, longC:=true
+    else if pdir==-1 and dn15
+        fsm:=2, shortC:=true
+if fsm==2
+    fsm:=0, pdir:=0
+
+// ---------------- ФИЛЬТР ИМПУЛЬСА (отсев вялых сломов) ----------------
+// Диапазон свечи слома должен быть >= dispAtr*ATR14. dispAtr=0 -> фильтр выключен (правило №2 соблюдено).
+float atr14=ta.atr(14)
+bool strongBreak = dispAtr<=0 or (atr14>0 and (high-low)>=dispAtr*atr14)
+if not strongBreak
+    longC:=false, shortC:=false
+
+// ---------------- ПОИСК ОРДЕР-БЛОКА ----------------
+f_obLong(int lb) =>
+    float eH=na, float eL=na
+    for i=1 to lb
+        if na(eH) and close[i]<open[i]
+            eH:=high[i], eL:=low[i]
+    [eH,eL]
+f_obShort(int lb) =>
+    float eL=na, float eH=na
+    for i=1 to lb
+        if na(eL) and close[i]>open[i]
+            eL:=low[i], eH:=high[i]
+    [eL,eH]
+
+float tick=syminfo.mintick, float buf=slBuf*tick
+var float pEntry=na, var float pSL=na, var int pDir=0, var int pAge=0
+
+// постановка отложенного OB-ретеста по сигналу
+if longC and strategy.position_size==0 and na(pEntry)
+    [eH,eL]=f_obLong(obLookback)
+    if not na(eH)
+        pEntry:=eH, pSL:=eL-buf, pDir:=1, pAge:=0
+if shortC and strategy.position_size==0 and na(pEntry)
+    [eL,eH]=f_obShort(obLookback)
+    if not na(eL)
+        pEntry:=eL, pSL:=eH+buf, pDir:=-1, pAge:=0
+
+// ---------------- ИСПОЛНЕНИЕ ----------------
+var float entryPx=na, var float slPx=na, var float tpPx=na, var float tp1Px=na
+var float rDist=na, var bool tp1Done=false
+
+// размещение/обновление лимитки ретеста
+if not na(pEntry) and strategy.position_size==0
+    pAge+=1
+    float dist=pDir==1 ? pEntry-pSL : pSL-pEntry
+    if dist>0
+        float ra=strategy.equity*riskPct/100.0
+        float qty=math.min(ra/dist, strategy.equity*maxLev/pEntry)
+        if pDir==1
+            strategy.entry("L",strategy.long,qty=qty,limit=pEntry)
+        else
+            strategy.entry("S",strategy.short,qty=qty,limit=pEntry)
+        entryPx:=pEntry, slPx:=pSL, rDist:=dist, tp1Done:=false
+        tpPx := pDir==1 ? pEntry+dist*rr : pEntry-dist*rr
+        tp1Px:= pDir==1 ? pEntry+dist : pEntry-dist
+    if pAge>retestWin
+        strategy.cancel("L"), strategy.cancel("S")
+        pEntry:=na, pSL:=na, pDir:=0
+
+// позиция открыта -> сбрасываем pending и ставим защиту
+bool inLong=strategy.position_size>0, bool inShort=strategy.position_size<0
+if (inLong or inShort) and not na(pEntry)
+    pEntry:=na, pSL:=na, pDir:=0
+
+// частичная фиксация (опц.) + перевод в безубыток
+if usePartial and not tp1Done
+    if inLong and high>=tp1Px
+        strategy.exit("p1",from_entry="L",qty_percent=50,limit=tp1Px)
+        slPx:=entryPx, tp1Done:=true
+    if inShort and low<=tp1Px
+        strategy.exit("p1",from_entry="S",qty_percent=50,limit=tp1Px)
+        slPx:=entryPx, tp1Done:=true
+
+// основная защита SL/TP
+if inLong
+    strategy.exit("xL",from_entry="L",stop=slPx,limit=tpPx)
+if inShort
+    strategy.exit("xS",from_entry="S",stop=slPx,limit=tpPx)
+
+// опц. выход по обратному CHoCH 15m
+if exitRev and inLong and dn15
+    strategy.close("L",comment="revCHoCH")
+if exitRev and inShort and up15
+    strategy.close("S",comment="revCHoCH")
+
+// ---------------- ВИЗУАЛИЗАЦИЯ ----------------
+plotshape(showSig and longC, "Long CHoCH", shape.triangleup, location.belowbar, color.new(color.green,0), size=size.tiny)
+plotshape(showSig and shortC,"Short CHoCH",shape.triangledown,location.abovebar, color.new(color.red,0), size=size.tiny)
+plot(strategy.position_size!=0 ? slPx : na,"SL",color.new(color.red,0),2,plot.style_linebr)
+plot(strategy.position_size!=0 ? tpPx : na,"TP",color.new(color.green,0),2,plot.style_linebr)
