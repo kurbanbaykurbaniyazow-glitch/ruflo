@@ -58,12 +58,21 @@ def backtest(b5, p, fee_pct=0.05):
                     half = pos["q"]*0.5; eq += (pos["tp1"]-pos["e"])*half*s - half*pos["tp1"]*fee
                     pos["real"] += (pos["tp1"]-pos["e"])*half*s; pos["qr"] -= half
                     pos["tp1d"] = True; pos["sl"] = pos["e"]
-            # остаток: финальная цель = глобальный 4H уровень (tp2), активна всегда
-            if not closed:
+            # остаток: финальная цель = глобальный 4H уровень (tp2), активна если use_tp2
+            if not closed and p.get("use_tp2", True):
                 if (h >= pos["tp2"]) if s == 1 else (l <= pos["tp2"]):
                     px = pos["tp2"]; eq += (px-pos["e"])*pos["qr"]*s - pos["qr"]*px*fee
                     pos["real"] += (px-pos["e"])*pos["qr"]*s; trades.append(pos["real"]); pos = None; closed = True
-            # после TP1: трейлим остаток вверх к 4H уровню (защищаем прибыль, даём бежать)
+            # после TP1: двигаем стоп ПО СТРУКТУРЕ — за каждый новый откат (swing low/high 1H)
+            if not closed and p.get("struct_trail") and pos["tp1d"]:
+                lpl = ms1[i][3]; lph = ms1[i][2]
+                if s == 1 and lpl is not None:
+                    ns = lpl - p["sl_buf"]*atr1[i]
+                    if ns > pos["sl"]: pos["sl"] = ns
+                elif s == -1 and lph is not None:
+                    ns = lph + p["sl_buf"]*atr1[i]
+                    if ns < pos["sl"]: pos["sl"] = ns
+            # (опц.) ATR-трейлинг — выключен по умолчанию
             if not closed and p.get("runner_trail") and pos["tp1d"]:
                 tr = p["runner_trail"]*atr1[i]
                 pos["sl"] = max(pos["sl"], bar["c"]-tr) if s == 1 else min(pos["sl"], bar["c"]+tr)
