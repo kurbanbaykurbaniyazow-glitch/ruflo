@@ -58,11 +58,12 @@ def backtest(b5, p, fee_pct=0.05):
                     half = pos["q"]*0.5; eq += (pos["tp1"]-pos["e"])*half*s - half*pos["tp1"]*fee
                     pos["real"] += (pos["tp1"]-pos["e"])*half*s; pos["qr"] -= half
                     pos["tp1d"] = True; pos["sl"] = pos["e"]
-            # остаток: либо TP2 на 4H зоне, либо трейлинг (runner) — зависит от режима
-            if not closed and not p.get("runner_trail"):
+            # остаток: финальная цель = глобальный 4H уровень (tp2), активна всегда
+            if not closed:
                 if (h >= pos["tp2"]) if s == 1 else (l <= pos["tp2"]):
                     px = pos["tp2"]; eq += (px-pos["e"])*pos["qr"]*s - pos["qr"]*px*fee
                     pos["real"] += (px-pos["e"])*pos["qr"]*s; trades.append(pos["real"]); pos = None; closed = True
+            # после TP1: трейлим остаток вверх к 4H уровню (защищаем прибыль, даём бежать)
             if not closed and p.get("runner_trail") and pos["tp1d"]:
                 tr = p["runner_trail"]*atr1[i]
                 pos["sl"] = max(pos["sl"], bar["c"]-tr) if s == 1 else min(pos["sl"], bar["c"]+tr)
