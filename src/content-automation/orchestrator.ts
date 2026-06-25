@@ -4,6 +4,7 @@ import { ContentPlannerAgent } from './agents/content-planner.js';
 import { YouTubePublisherAgent } from './agents/publisher-youtube.js';
 import { TikTokPublisherAgent } from './agents/publisher-tiktok.js';
 import { AnalyticsMonitorAgent } from './agents/analytics-monitor.js';
+import { getCapabilities } from './config/index.js';
 import type {
   AgentConfig, ContentPlan, VideoAsset, PublishResult, WorkflowState,
 } from './types/index.js';
@@ -205,12 +206,22 @@ export class ContentAutomationOrchestrator {
 
   async run(): Promise<WorkflowState> {
     console.log('\n=== Content Automation Workflow Starting ===\n');
+    const caps = getCapabilities(this.config);
+
+    console.log('[Orchestrator] Available capabilities:');
+    console.log(`  Trends:       ${caps.canFetchTrends ? '✅' : '❌ (add YOUTUBE_API_KEY)'}`);
+    console.log(`  AI Planning:  ${caps.canPlanContent ? '✅' : '❌ (add ANTHROPIC_API_KEY)'}`);
+    console.log(`  Video Gen:    ${caps.canGenerateVideos ? '✅' : '❌ (add OPENAI_API_KEY)'}`);
+    console.log(`  YouTube Pub:  ${caps.canPublishYouTube ? '✅' : '⏭  (add YouTube OAuth tokens)'}`);
+    console.log(`  TikTok Pub:   ${caps.canPublishTikTok ? '✅' : '⏭  (add TIKTOK_ACCESS_TOKEN)'}`);
+    console.log('');
+
     const start = Date.now();
 
     await this.discoverTrends();
-    await this.planContent();
-    await this.generateVideos();
-    await this.publishVideos();
+    if (caps.canPlanContent) await this.planContent();
+    if (caps.canGenerateVideos) await this.generateVideos();
+    if (caps.canPublishYouTube || caps.canPublishTikTok) await this.publishVideos();
     await this.collectAnalytics();
 
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);

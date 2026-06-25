@@ -14,12 +14,15 @@ export class TrendScoutAgent {
   }
 
   async fetchYouTubeTrends(): Promise<TrendData[]> {
+    const apiKey = process.env.YOUTUBE_API_KEY;
+    if (!apiKey) throw new Error('YOUTUBE_API_KEY not set');
+
     const params = new URLSearchParams({
       part: 'snippet,statistics',
       chart: 'mostPopular',
       maxResults: '20',
       regionCode: 'US',
-      key: process.env.YOUTUBE_API_KEY || '',
+      key: apiKey,
     });
 
     const response = await fetch(`${YOUTUBE_TRENDING_URL}?${params}`);
