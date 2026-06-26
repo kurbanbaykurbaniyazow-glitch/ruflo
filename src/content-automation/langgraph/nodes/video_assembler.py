@@ -360,33 +360,38 @@ def assemble_video_node(state: dict) -> dict:
     has_music = music_path and Path(music_path).exists()
 
     if has_narration and has_music:
-        # Mix: narration at 100% + music at 15% volume
+        # Resample both to 44100Hz, mix: voice 100% + music 35%
+        mix_filter = (
+            '[1:a]aresample=44100[narr];'
+            '[2:a]aresample=44100,volume=0.35[music];'
+            '[narr][music]amix=inputs=2:duration=first:normalize=0[aout]'
+        )
         cmd_mix = [
             ffmpeg, '-y',
             '-i', raw_video,
             '-i', audio_path,
             '-i', music_path,
-            '-filter_complex',
-            '[1:a]volume=1.0[narr];[2:a]volume=0.15[music];[narr][music]amix=inputs=2:duration=shortest[aout]',
+            '-filter_complex', mix_filter,
             '-map', '0:v', '-map', '[aout]',
-            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest',
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-shortest',
             final_video,
         ]
     elif has_narration:
         cmd_mix = [
             ffmpeg, '-y',
             '-i', raw_video, '-i', audio_path,
-            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest',
+            '-filter_complex', '[1:a]aresample=44100[aout]',
+            '-map', '0:v', '-map', '[aout]',
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-shortest',
             final_video,
         ]
     elif has_music:
-        # Music only at 30% (no narration)
         cmd_mix = [
             ffmpeg, '-y',
             '-i', raw_video, '-i', music_path,
-            '-filter_complex', '[1:a]volume=0.30[aout]',
+            '-filter_complex', '[1:a]aresample=44100,volume=0.5[aout]',
             '-map', '0:v', '-map', '[aout]',
-            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-shortest',
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-shortest',
             final_video,
         ]
     else:

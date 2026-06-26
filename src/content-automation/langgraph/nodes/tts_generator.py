@@ -68,7 +68,10 @@ def _init_flite():
 
 
 def generate_tts_flite(text: str, output_path: Path) -> Path:
-    """Offline TTS using libflite. Robotic but always works."""
+    """
+    Offline TTS using libflite + FFmpeg audio enhancement.
+    Pipeline: flite raw WAV → resample 44100Hz → EQ boost → reverb → loudnorm → MP3
+    """
     if not _init_flite():
         raise RuntimeError('flite not available')
     wav_path = output_path.with_suffix('.wav')
@@ -79,17 +82,26 @@ def generate_tts_flite(text: str, output_path: Path) -> Path:
     )
     if dur <= 0:
         raise RuntimeError('flite returned 0 duration')
-    # Convert WAV → MP3 for smaller size
+
     ffmpeg = _get_ffmpeg()
+    # Audio enhancement chain:
+    # aresample=44100 → boost 200Hz (warmth) + 3kHz (clarity)
+    # → subtle echo/reverb → loudness normalisation
+    af = (
+        'aresample=44100,'
+        'equalizer=f=200:width_type=o:width=2:g=3,'
+        'equalizer=f=3000:width_type=o:width=2:g=2,'
+        'aecho=0.5:0.7:50:0.3,'
+        'loudnorm=I=-16:TP=-1.5:LRA=11'
+    )
     r = subprocess.run(
-        [ffmpeg, '-y', '-i', str(wav_path), '-q:a', '4', str(output_path)],
+        [ffmpeg, '-y', '-i', str(wav_path), '-af', af, '-ar', '44100', '-q:a', '3', str(output_path)],
         capture_output=True
     )
+    wav_path.unlink(missing_ok=True)
     if r.returncode == 0 and output_path.exists():
-        wav_path.unlink(missing_ok=True)
-    else:
-        output_path = wav_path  # fallback: return WAV
-    return output_path
+        return output_path
+    raise RuntimeError(f'ffmpeg enhancement failed: {r.stderr[-200:]}')
 
 
 # ─── ElevenLabs (cloud, blocked in demo env) ──────────────────────────────────

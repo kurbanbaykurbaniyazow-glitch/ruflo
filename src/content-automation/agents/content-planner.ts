@@ -73,25 +73,28 @@ Return ONLY valid JSON:
       max_tokens: 1500,
       messages: [{
         role: 'user',
-        content: `You are a top-tier YouTube Shorts scriptwriter. Write a viral 60-second script.
+        content: `You are a viral TikTok/YouTube Shorts scriptwriter for 2026. Write a 20-second script that hooks in 1.3 seconds.
 
 Topic: "${trend.keyword}"
-Video title: "${title}"
+Title: "${title}"
 
-Format exactly like this — 6 scenes, each starting with [SCENE N]:
+Write EXACTLY 6 scenes. Each scene = what the narrator SAYS OUT LOUD (not descriptions).
 
-[SCENE 1]: Hook — shocking stat or question (5-7 words spoken)
-[SCENE 2]: Problem setup — why viewers should care
-[SCENE 3]: The reveal or solution
-[SCENE 4]: Proof — stats, examples, social proof
-[SCENE 5]: Deeper insight — what most people miss
-[SCENE 6]: CTA — follow, comment, share
+Format:
+[SCENE 1]: 5-8 words MAX — shocking hook, number or question
+[SCENE 2]: 10-15 words — the painful problem or surprising fact
+[SCENE 3]: 10-15 words — the secret/reveal (start with "But here's the truth:" or similar)
+[SCENE 4]: 10-15 words — real proof: specific number, example, or name
+[SCENE 5]: 10-15 words — the insight nobody talks about
+[SCENE 6]: 8-12 words — CTA with a REASON ("Follow us — we post this daily")
 
-Rules:
-- Each scene: 1-3 sentences max (it's 10 seconds per scene)
-- Start scene 1 with a HOOK that stops the scroll
-- Use "you" language — speak directly to viewer
-- End with a strong reason to follow the account`,
+Rules (CRITICAL):
+- Scene 1 MUST be a jaw-drop: use a shocking number, "You're doing X wrong", or a question
+- Speak directly: "you", "your", never "people" or "they"
+- ZERO filler words: no "basically", "actually", "so", "well"
+- Each sentence: short, punchy, spoken word — like you're whispering a secret
+- Include ONE real specific example or statistic with a source name (even approximate)
+- Scene 6: give a compelling reason to follow, not just "follow me"`,
       }],
     });
 
