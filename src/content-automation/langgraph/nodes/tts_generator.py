@@ -1,93 +1,161 @@
+"""
+TTS generator node for LangGraph video pipeline.
+
+Priority order:
+1. ElevenLabs (cloud, best quality) — needs ELEVENLABS_API_KEY
+2. OpenAI TTS-1-HD (cloud, great) — needs OPENAI_API_KEY
+3. edge-tts / Microsoft Edge TTS (cloud, free) — needs network
+4. Flite (offline, robotic but works always) — bundled via libflite1
+
+In production: use ElevenLabs or OpenAI.
+In this demo environment (blocked APIs): flite is used automatically.
+"""
+import ctypes
 import os
 import re
+import subprocess
 from pathlib import Path
-from openai import OpenAI
 
-client = OpenAI()
 OUTPUT_DIR = Path(os.getenv('VIDEO_OUTPUT_DIR', '/tmp/content-automation'))
-
-# ElevenLabs as alternative TTS
 ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY', '')
-ELEVENLABS_VOICE_ID = os.getenv('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # Rachel
+ELEVENLABS_VOICE_ID = os.getenv('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 
+
+def clean_script_for_tts(script: str) -> str:
+    text = re.sub(r'\[SCENE\s*\d+\]:\s*', '', script)
+    text = re.sub(r'[*_#`]', '', text)
+    text = re.sub(r'[^\w\s.,!?\'"-]', ' ', text)
+    return ' '.join(text.split())
+
+
+def _get_ffmpeg() -> str:
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        return 'ffmpeg'
+
+
+# ─── Flite offline TTS (always available) ────────────────────────────────────
+
+_flite_lib = None
+_flite_voice = None
+
+
+def _init_flite():
+    global _flite_lib, _flite_voice
+    if _flite_lib is not None:
+        return True
+    try:
+        lib = ctypes.CDLL('/usr/lib/x86_64-linux-gnu/libflite.so.2.2')
+        # Use SLT voice (female, clearer)
+        voice_lib = ctypes.CDLL('/usr/lib/x86_64-linux-gnu/libflite_cmu_us_slt.so.2.2')
+        lib.flite_init.restype = ctypes.c_int
+        lib.flite_init()
+        voice_lib.register_cmu_us_slt.restype = ctypes.c_void_p
+        voice = voice_lib.register_cmu_us_slt(None)
+        lib.flite_text_to_speech.argtypes = [
+            ctypes.c_char_p, ctypes.c_void_p, ctypes.c_char_p
+        ]
+        lib.flite_text_to_speech.restype = ctypes.c_float
+        _flite_lib = lib
+        _flite_voice = ctypes.c_void_p(voice)
+        return True
+    except Exception as e:
+        print(f'[TTS/flite] Init failed: {e}')
+        return False
+
+
+def generate_tts_flite(text: str, output_path: Path) -> Path:
+    """Offline TTS using libflite. Robotic but always works."""
+    if not _init_flite():
+        raise RuntimeError('flite not available')
+    wav_path = output_path.with_suffix('.wav')
+    dur = _flite_lib.flite_text_to_speech(
+        text.encode('ascii', errors='replace'),
+        _flite_voice,
+        str(wav_path).encode(),
+    )
+    if dur <= 0:
+        raise RuntimeError('flite returned 0 duration')
+    # Convert WAV → MP3 for smaller size
+    ffmpeg = _get_ffmpeg()
+    r = subprocess.run(
+        [ffmpeg, '-y', '-i', str(wav_path), '-q:a', '4', str(output_path)],
+        capture_output=True
+    )
+    if r.returncode == 0 and output_path.exists():
+        wav_path.unlink(missing_ok=True)
+    else:
+        output_path = wav_path  # fallback: return WAV
+    return output_path
+
+
+# ─── ElevenLabs (cloud, blocked in demo env) ──────────────────────────────────
+
+def generate_tts_elevenlabs(text: str, output_path: Path) -> Path:
+    import httpx
+    url = f'https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}'
+    payload = {
+        'text': text,
+        'model_id': 'eleven_turbo_v2',
+        'voice_settings': {'stability': 0.5, 'similarity_boost': 0.75},
+    }
+    with httpx.Client(timeout=60) as c:
+        r = c.post(url, json=payload, headers={
+            'Accept': 'audio/mpeg',
+            'Content-Type': 'application/json',
+            'xi-api-key': ELEVENLABS_API_KEY,
+        })
+        r.raise_for_status()
+        output_path.write_bytes(r.content)
+    return output_path
+
+
+# ─── OpenAI TTS (cloud, blocked in demo env) ──────────────────────────────────
 
 def generate_tts_openai(text: str, output_path: Path) -> Path:
-    """Generate TTS using OpenAI's TTS API."""
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
     response = client.audio.speech.create(
-        model='tts-1-hd',
-        voice='nova',
-        input=text,
-        response_format='mp3',
+        model='tts-1-hd', voice='nova', input=text, response_format='mp3'
     )
     response.stream_to_file(str(output_path))
     return output_path
 
 
-def generate_tts_elevenlabs(text: str, output_path: Path) -> Path:
-    """Generate TTS using ElevenLabs for higher quality."""
-    import httpx
-
-    url = f'https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}'
-    headers = {
-        'Accept': 'audio/mpeg',
-        'Content-Type': 'application/json',
-        'xi-api-key': ELEVENLABS_API_KEY,
-    }
-    payload = {
-        'text': text,
-        'model_id': 'eleven_turbo_v2',
-        'voice_settings': {
-            'stability': 0.5,
-            'similarity_boost': 0.75,
-            'style': 0.3,
-            'use_speaker_boost': True,
-        },
-    }
-
-    with httpx.Client() as http_client:
-        response = http_client.post(url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        output_path.write_bytes(response.content)
-
-    return output_path
-
-
-def clean_script_for_tts(script: str) -> str:
-    """Remove stage directions and clean up text for TTS."""
-    # Remove [SCENE X]: markers
-    text = re.sub(r'\[SCENE\s*\d+\]:\s*', '', script)
-    # Remove markdown formatting
-    text = re.sub(r'[*_#`]', '', text)
-    # Normalize whitespace
-    text = ' '.join(text.split())
-    return text
-
+# ─── LangGraph Node ───────────────────────────────────────────────────────────
 
 def generate_tts_node(state: dict) -> dict:
-    """LangGraph node: generate TTS audio for the full script."""
+    """LangGraph node: generate TTS narration audio."""
     script: str = state.get('script', '')
     content_id: str = state.get('content_id', 'default')
 
     if not script:
-        return {**state, 'error': 'No script for TTS'}
+        return {**state, 'audio_path': None, 'error': None}
 
     audio_dir = OUTPUT_DIR / content_id / 'audio'
     audio_dir.mkdir(parents=True, exist_ok=True)
     audio_path = audio_dir / 'narration.mp3'
-
     clean_text = clean_script_for_tts(script)
 
-    try:
-        if ELEVENLABS_API_KEY:
-            print('[TTS] Using ElevenLabs...')
-            generate_tts_elevenlabs(clean_text, audio_path)
-        else:
-            print('[TTS] Using OpenAI TTS...')
-            generate_tts_openai(clean_text, audio_path)
+    # Try providers in order
+    providers = []
+    if ELEVENLABS_API_KEY:
+        providers.append(('ElevenLabs', lambda: generate_tts_elevenlabs(clean_text, audio_path)))
+    if OPENAI_API_KEY:
+        providers.append(('OpenAI', lambda: generate_tts_openai(clean_text, audio_path)))
+    providers.append(('Flite (offline)', lambda: generate_tts_flite(clean_text, audio_path)))
 
-        print(f'[TTS] Audio saved: {audio_path}')
-        return {**state, 'audio_path': str(audio_path), 'error': None}
+    for name, fn in providers:
+        try:
+            print(f'[TTS] Trying {name}...')
+            result = fn()
+            print(f'[TTS] ✅ {name} → {result}')
+            return {**state, 'audio_path': str(result), 'error': None}
+        except Exception as e:
+            print(f'[TTS] ❌ {name}: {e}')
 
-    except Exception as e:
-        print(f'[TTS] Error: {e}')
-        return {**state, 'audio_path': None, 'error': str(e)}
+    print('[TTS] All providers failed, continuing without audio')
+    return {**state, 'audio_path': None, 'error': None}

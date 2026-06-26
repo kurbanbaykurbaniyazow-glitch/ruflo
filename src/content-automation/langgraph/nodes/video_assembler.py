@@ -354,22 +354,51 @@ def assemble_video_node(state: dict) -> dict:
         if r2.returncode != 0:
             return {**state, 'error': f'FFmpeg error: {r2.stderr[-400:]}'}
 
-    # Mix audio
-    if audio_path and Path(audio_path).exists():
+    # Mix audio: narration (foreground) + background music
+    music_path: str | None = state.get('music_path')
+    has_narration = audio_path and Path(audio_path).exists()
+    has_music = music_path and Path(music_path).exists()
+
+    if has_narration and has_music:
+        # Mix: narration at 100% + music at 15% volume
         cmd_mix = [
             ffmpeg, '-y',
             '-i', raw_video,
             '-i', audio_path,
+            '-i', music_path,
+            '-filter_complex',
+            '[1:a]volume=1.0[narr];[2:a]volume=0.15[music];[narr][music]amix=inputs=2:duration=shortest[aout]',
+            '-map', '0:v', '-map', '[aout]',
             '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest',
             final_video,
         ]
+    elif has_narration:
+        cmd_mix = [
+            ffmpeg, '-y',
+            '-i', raw_video, '-i', audio_path,
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest',
+            final_video,
+        ]
+    elif has_music:
+        # Music only at 30% (no narration)
+        cmd_mix = [
+            ffmpeg, '-y',
+            '-i', raw_video, '-i', music_path,
+            '-filter_complex', '[1:a]volume=0.30[aout]',
+            '-map', '0:v', '-map', '[aout]',
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-shortest',
+            final_video,
+        ]
+    else:
+        import shutil
+        shutil.copy(raw_video, final_video)
+        cmd_mix = None
+
+    if cmd_mix:
         r3 = subprocess.run(cmd_mix, capture_output=True, text=True)
         if r3.returncode != 0:
             import shutil
             shutil.copy(raw_video, final_video)
-    else:
-        import shutil
-        shutil.copy(raw_video, final_video)
 
     # Thumbnail from frame 0
     thumbnail_path = str(video_dir / 'thumbnail.jpg')
