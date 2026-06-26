@@ -1,16 +1,30 @@
 """
-Video assembler: composites DALL-E images into a cinematic studio-quality vertical video.
-When no AI images are available, falls back to professional PIL-generated slides.
+Viral 2026 TikTok/Shorts video assembler.
+Design: giant bold text with black stroke, emoji anchors, clean gradient, top progress bar.
+Target: 15-25s, hook in 1.3s, TikTok-native caption style.
 """
 import os
-import random
 import subprocess
+import textwrap
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 OUTPUT_DIR = Path(os.getenv('VIDEO_OUTPUT_DIR', '/tmp/content-automation'))
 BRAND_HANDLE = os.getenv('BRAND_HANDLE', '@AIInsiderDaily')
 W, H = 1080, 1920
+SCENE_DURATION = 3  # seconds per slide — 6 slides = 18s total
+
+# Accent colors: one per theme, cycling per-video
+ACCENT_COLORS = [
+    (255, 230, 0),    # yellow — curiosity/money
+    (0, 230, 120),    # green — health/growth
+    (100, 180, 255),  # blue — tech/info
+    (255, 80, 120),   # red-pink — shocking/drama
+    (200, 120, 255),  # purple — mystery
+]
+
+# Scene emojis mapped by position (hook, problem, reveal, proof, insight, cta)
+SCENE_EMOJIS = ['🤯', '😱', '💡', '📊', '🔥', '👆']
 
 
 def _get_ffmpeg() -> str:
@@ -21,222 +35,221 @@ def _get_ffmpeg() -> str:
         return 'ffmpeg'
 
 
-def _font(size: int, bold: bool = True) -> ImageFont.ImageFont:
+def _find_bold_font(size: int) -> ImageFont.ImageFont:
+    """Find largest available bold/condensed font."""
     candidates = [
-        f"/usr/share/fonts/truetype/dejavu/DejaVuSans-{'Bold' if bold else ''}.ttf",
-        f"/usr/share/fonts/truetype/liberation/LiberationSans-{'Bold' if bold else 'Regular'}.ttf",
-        f"/usr/share/fonts/truetype/ubuntu/Ubuntu-{'B' if bold else 'R'}.ttf",
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
     ]
     for p in candidates:
         if os.path.exists(p):
             try:
                 return ImageFont.truetype(p, size)
             except OSError:
-                pass
+                continue
     return ImageFont.load_default()
 
 
+def _find_emoji_font(size: int) -> ImageFont.ImageFont:
+    """Find emoji font."""
+    candidates = [
+        '/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf',
+        '/usr/share/fonts/noto/NotoColorEmoji.ttf',
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except OSError:
+                continue
+    return _find_bold_font(size)
+
+
 def _vgrad(img: Image.Image, c1: tuple, c2: tuple) -> None:
+    """Clean vertical gradient — no effects, just colors."""
     d = ImageDraw.Draw(img)
     for y in range(H):
         t = y / H
-        r, g, b = (int(c1[i] + t * (c2[i] - c1[i])) for i in range(3))
+        r = int(c1[0] + t * (c2[0] - c1[0]))
+        g = int(c1[1] + t * (c2[1] - c1[1]))
+        b = int(c1[2] + t * (c2[2] - c1[2]))
         d.line([(0, y), (W, y)], fill=(r, g, b))
 
 
-def _add_vignette(img: Image.Image) -> Image.Image:
-    ov = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(ov)
-    cx, cy = W // 2, H // 2
-    for r in range(max(W, H), 0, -10):
-        dist = r / max(W, H)
-        a = max(0, int(150 * (dist ** 2.2)))
-        d.ellipse([(cx - r, cy - r * 1.4), (cx + r, cy + r * 1.4)], fill=(0, 0, 0, a))
-    return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
+def _draw_stroked_text(draw: ImageDraw.ImageDraw, pos: tuple, text: str,
+                        font: ImageFont.ImageFont, fill: tuple,
+                        stroke_width: int = 8) -> None:
+    """Draw text with thick black stroke — TikTok viral caption style."""
+    x, y = pos
+    stroke_color = (0, 0, 0)
+    # 8-direction stroke
+    for dx in range(-stroke_width, stroke_width + 1, 2):
+        for dy in range(-stroke_width, stroke_width + 1, 2):
+            if dx == 0 and dy == 0:
+                continue
+            draw.text((x + dx, y + dy), text, font=font, fill=stroke_color)
+    draw.text((x, y), text, font=font, fill=fill)
 
 
-def _add_grain(img: Image.Image, intensity: int = 10) -> Image.Image:
-    ov = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(ov)
-    for _ in range(W * H // 100):
-        x, y = random.randint(0, W - 1), random.randint(0, H - 1)
-        a = random.randint(0, intensity)
-        d.point((x, y), fill=(255, 255, 255, a))
-    return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
-
-
-def _add_scanlines(img: Image.Image, alpha: int = 14) -> Image.Image:
-    ov = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(ov)
-    for y in range(0, H, 4):
-        d.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
-    return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
-
-
-def _add_glow(img: Image.Image, color: tuple, cx: int = W // 2, cy: int = H // 2) -> Image.Image:
-    ov = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(ov)
-    for i in range(7):
-        r = 550 - i * 60
-        a = max(0, 40 - i * 5)
-        d.ellipse([(cx - r, cy - r), (cx + r, cy + r)], fill=(*color, a))
-    return Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
-
-
-def _wrap(draw: ImageDraw.ImageDraw, text: str, f: ImageFont.ImageFont, max_w: int) -> list[str]:
+def _wrap_tight(text: str, font: ImageFont.ImageFont, max_w: int) -> list[str]:
+    """Wrap text to fit within max_w, respecting natural breaks."""
+    words = text.split()
     lines = []
-    for raw in text.split('\n'):
-        words = raw.split()
-        if not words:
-            lines.append('')
-            continue
-        cur = ''
-        for w in words:
-            t = (cur + ' ' + w).strip()
-            if draw.textlength(t, font=f) <= max_w:
-                cur = t
-            else:
-                if cur:
-                    lines.append(cur)
-                cur = w
+    cur = ''
+    dummy = Image.new('RGB', (1, 1))
+    d = ImageDraw.Draw(dummy)
+    for word in words:
+        test = (cur + ' ' + word).strip() if cur else word
+        if d.textlength(test, font=font) <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
         lines.append(cur)
     return lines
 
 
-def _put(draw: ImageDraw.ImageDraw, text: str, f: ImageFont.ImageFont,
-         y: int, fill: tuple, max_w: int = W - 100, shadow: bool = True) -> int:
-    for line in _wrap(draw, text, f, max_w):
-        if not line:
-            y += int(f.size * 0.4)
-            continue
-        lw = draw.textlength(line, font=f)
-        x = (W - lw) // 2
-        if shadow:
-            draw.text((x + 3, y + 3), line, fill=(0, 0, 0, 130), font=f)
-        draw.text((x, y), line, fill=fill, font=f)
-        y += int(f.size * 1.22)
-    return y
-
-
-# Cinematic color palettes — one per scene type
-PALETTES = [
-    {'bg': [(4, 4, 8), (14, 8, 24)],   'acc': (139, 92, 246)},   # purple
-    {'bg': [(4, 12, 22), (8, 22, 44)],  'acc': (56, 189, 248)},   # cyan
-    {'bg': [(4, 16, 6), (8, 28, 14)],   'acc': (16, 185, 129)},   # green
-    {'bg': [(20, 8, 4), (36, 14, 6)],   'acc': (251, 146, 60)},   # orange
-    {'bg': [(20, 4, 8), (36, 8, 16)],   'acc': (251, 113, 133)},  # pink
-    {'bg': [(18, 16, 4), (30, 26, 8)],  'acc': (250, 204, 21)},   # gold
-    {'bg': [(10, 10, 10), (20, 20, 20)],'acc': (255, 255, 255)},  # white
-]
-
-TOTAL_SCENES = 7
-
-
-def make_studio_slide(
-    idx: int,
-    total: int,
-    eyebrow: str,
+def make_viral_slide(
+    scene_idx: int,
+    total_scenes: int,
     headline: str,
-    body: str,
-    caption: str,
-    image_path: str | None = None,
-    palette: dict | None = None,
+    subtext: str,
+    emoji: str,
+    accent: tuple,
+    is_hook: bool = False,
 ) -> Image.Image:
-    """Render a single cinematic studio-style slide."""
-    pal = palette or PALETTES[idx % len(PALETTES)]
-    acc = pal['acc']
-    bg1, bg2 = pal['bg'][0], pal['bg'][1]
-
-    # Base
-    img = Image.new('RGB', (W, H), bg1)
-    _vgrad(img, bg1, bg2)
-    img = _add_glow(img, acc)
-    img = _add_grain(img)
-    img = _add_vignette(img)
-    img = _add_scanlines(img)
-
-    # If we have a DALL-E image, composite it behind the text
-    if image_path and Path(image_path).exists():
-        try:
-            bg_img = Image.open(image_path).convert('RGB').resize((W, H), Image.LANCZOS)
-            # Blend 30% image + 70% gradient for readability
-            img = Image.blend(img, bg_img, alpha=0.30)
-            img = _add_vignette(img)  # re-apply vignette
-        except Exception:
-            pass
+    """
+    Render a single 2026-viral-style slide:
+    - Clean dark gradient background
+    - Top progress bar
+    - Large emoji anchor
+    - Giant stroked headline
+    - Small caption subtext at bottom
+    - Brand watermark
+    """
+    # Background: near-black gradient with faint accent tint
+    bg_dark = (6, 6, 10)
+    bg_hint = (
+        min(6 + accent[0] // 20, 30),
+        min(6 + accent[1] // 20, 30),
+        min(6 + accent[2] // 20, 30),
+    )
+    img = Image.new('RGB', (W, H), bg_dark)
+    _vgrad(img, bg_dark, bg_hint)
 
     d = ImageDraw.Draw(img)
 
-    # Top accent line
-    d.rectangle([(0, 0), (W, 3)], fill=acc)
-
-    # Brand handle
-    d.text((44, 22), BRAND_HANDLE, fill=(*acc, 155), font=_font(30, bold=False))
-
-    # Eyebrow pill (top-right)
-    ef = _font(30)
-    ew = int(d.textlength(eyebrow, font=ef))
-    ex = W - ew - 80
-    ey = 16
-    d.rounded_rectangle([(ex - 14, ey - 4), (ex + ew + 14, ey + 40)], radius=20, fill=acc)
-    d.text((ex, ey + 3), eyebrow, fill=(0, 0, 0, 230), font=ef)
-
-    # Scene progress dots
-    dot_y = 96
-    step = 28
-    start_x = (W - total * step) // 2
-    for i in range(total):
-        cx = start_x + i * step + 6
-        if i == idx:
-            d.ellipse([(cx - 7, dot_y - 7), (cx + 7, dot_y + 7)], fill=acc)
-        else:
-            d.ellipse([(cx - 4, dot_y - 4), (cx + 4, dot_y + 4)], fill=(*acc, 65))
-
-    # Headline
-    hl_size = 100 if max(len(l) for l in headline.split('\n')) < 14 else 80
-    hf = _font(hl_size)
-    hy = H // 2 - 320
-    hy = _put(d, headline, hf, hy, (255, 255, 255))
-
-    # Thin accent divider
-    d.rounded_rectangle([(W // 2 - 90, hy + 16), (W // 2 + 90, hy + 19)], radius=2, fill=acc)
-    hy += 44
-
-    # Body
-    if body:
-        bf = _font(50, bold=False)
-        hy = _put(d, body, bf, hy, (210, 215, 225), shadow=False)
-
-    # Lower-third caption
-    if caption:
-        cf = _font(40, bold=False)
-        cap_y = H - 195
-        ov3 = Image.new('RGBA', (W, H), (0, 0, 0, 0))
-        d3 = ImageDraw.Draw(ov3)
-        d3.rounded_rectangle([(50, cap_y - 16), (W - 50, cap_y + 58)], radius=14, fill=(0, 0, 0, 130))
-        img = Image.alpha_composite(img.convert('RGBA'), ov3).convert('RGB')
-        d = ImageDraw.Draw(img)
-        cw = d.textlength(caption, font=cf)
-        d.text(((W - cw) // 2, cap_y), caption, fill=(228, 228, 228), font=cf)
-
-    # Progress bar
+    # ── TOP PROGRESS BAR ─────────────────────────────────────────────────────
+    bar_h = 7
     bar_w = W - 80
     bx = 40
-    bar_y = H - 44
-    d.rounded_rectangle([(bx, bar_y), (bx + bar_w, bar_y + 5)], radius=3, fill=(*acc, 45))
-    fill_w = int(bar_w * ((idx + 1) / total))
-    if fill_w > 4:
-        d.rounded_rectangle([(bx, bar_y), (bx + fill_w, bar_y + 5)], radius=3, fill=acc)
-    d.ellipse([(bx + fill_w - 6, bar_y - 3), (bx + fill_w + 6, bar_y + 8)], fill=acc)
+    by = 28
+    # track
+    d.rounded_rectangle([(bx, by), (bx + bar_w, by + bar_h)],
+                         radius=4, fill=(*accent, 40))
+    # fill
+    fill_w = max(int(bar_w * (scene_idx + 1) / total_scenes), bar_h)
+    d.rounded_rectangle([(bx, by), (bx + fill_w, by + bar_h)],
+                         radius=4, fill=accent)
+    # dot
+    dot_cx = bx + fill_w
+    d.ellipse([(dot_cx - 6, by - 3), (dot_cx + 6, by + bar_h + 3)], fill=accent)
 
-    # Bottom accent line
-    d.rectangle([(0, H - 4), (W, H)], fill=acc)
+    # ── BRAND HANDLE (subtle, top-left under bar) ─────────────────────────────
+    brand_f = _find_bold_font(32)
+    d.text((bx, by + bar_h + 14), BRAND_HANDLE, fill=(*accent, 130), font=brand_f)
+
+    # ── EMOJI ANCHOR (center) ─────────────────────────────────────────────────
+    emoji_size = 260 if is_hook else 200
+    try:
+        ef = _find_emoji_font(emoji_size)
+        # Measure emoji width
+        dummy = Image.new('RGB', (1, 1))
+        dd = ImageDraw.Draw(dummy)
+        ew = dd.textlength(emoji, font=ef)
+        ex = (W - ew) // 2
+        ey = H // 2 - 520 if is_hook else H // 2 - 440
+        d.text((ex, ey), emoji, font=ef, embedded_color=True)
+    except Exception:
+        pass  # emoji rendering is optional
+
+    # ── HEADLINE TEXT ─────────────────────────────────────────────────────────
+    # Scale font size based on text length — shorter = bigger
+    if len(headline) <= 14:
+        font_size = 180 if is_hook else 160
+    elif len(headline) <= 24:
+        font_size = 150 if is_hook else 130
+    else:
+        font_size = 120 if is_hook else 100
+
+    hf = _find_bold_font(font_size)
+    lines = _wrap_tight(headline.upper(), hf, W - 80)
+
+    # Compute total text block height
+    line_h = int(font_size * 1.15)
+    total_h = len(lines) * line_h
+    start_y = H // 2 - total_h // 2 + (80 if not is_hook else 120)
+
+    for i, line in enumerate(lines):
+        dummy = Image.new('RGB', (1, 1))
+        dd = ImageDraw.Draw(dummy)
+        lw = dd.textlength(line, font=hf)
+        x = (W - lw) // 2
+        y = start_y + i * line_h
+        stroke = 10 if is_hook else 8
+        _draw_stroked_text(d, (x, y), line, hf, (255, 255, 255), stroke_width=stroke)
+
+    # ── ACCENT LINE UNDER HEADLINE ────────────────────────────────────────────
+    line_y = start_y + total_h + 24
+    aw = min(int(W * 0.35), 300)
+    ax = (W - aw) // 2
+    d.rounded_rectangle([(ax, line_y), (ax + aw, line_y + 5)], radius=3, fill=accent)
+
+    # ── SUBTEXT CAPTION (TikTok pill style) ────────────────────────────────────
+    if subtext:
+        sf = _find_bold_font(46)
+        cap_lines = _wrap_tight(subtext, sf, W - 140)
+        cap_line_h = int(46 * 1.25)
+        cap_total_h = len(cap_lines) * cap_line_h + 20
+        cap_y_start = H - 200 - cap_total_h
+
+        # dark pill background
+        ov = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+        dv = ImageDraw.Draw(ov)
+        pill_pad = 20
+        dv.rounded_rectangle(
+            [(50, cap_y_start - pill_pad),
+             (W - 50, cap_y_start + cap_total_h + pill_pad)],
+            radius=18, fill=(0, 0, 0, 170)
+        )
+        img = Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB')
+        d = ImageDraw.Draw(img)
+
+        for i, line in enumerate(cap_lines):
+            dummy = Image.new('RGB', (1, 1))
+            dd = ImageDraw.Draw(dummy)
+            lw = dd.textlength(line, font=sf)
+            x = (W - lw) // 2
+            y = cap_y_start + i * cap_line_h
+            _draw_stroked_text(d, (x, y), line, sf, (240, 240, 240), stroke_width=4)
+
+    # ── SCENE NUMBER (small, bottom-right) ──────────────────────────────────
+    num_f = _find_bold_font(36)
+    num_text = f'{scene_idx + 1}/{total_scenes}'
+    dummy = Image.new('RGB', (1, 1))
+    dd = ImageDraw.Draw(dummy)
+    nw = dd.textlength(num_text, font=num_f)
+    d.text((W - nw - 44, H - 58), num_text, fill=(*accent, 100), font=num_f)
 
     return img
 
 
 def assemble_video_node(state: dict) -> dict:
-    """LangGraph node: assemble studio-quality vertical video from scenes + audio."""
+    """LangGraph node: assemble viral short-form vertical video."""
     scenes: list[dict] = state.get('scenes', [])
     audio_path: str | None = state.get('audio_path')
     content_id: str = state.get('content_id', 'default')
@@ -250,34 +263,50 @@ def assemble_video_node(state: dict) -> dict:
     frames_dir = video_dir / 'frames'
     frames_dir.mkdir(exist_ok=True)
 
-    # Build script-based scene breakdown from script text
+    # Pick accent color based on content_id hash
+    accent = ACCENT_COLORS[hash(content_id) % len(ACCENT_COLORS)]
     total = len(scenes)
+
     slide_entries: list[tuple[str, int]] = []
 
     for i, scene in enumerate(scenes):
-        pal = PALETTES[i % len(PALETTES)]
-        text = scene.get('text', '')
-        image_path = scene.get('image_path')
+        text = scene.get('text', '').strip()
+        if not text:
+            continue
 
-        # Split scene text into headline / body
-        lines = [l.strip() for l in text.split('.') if l.strip()]
-        headline = lines[0] if lines else title
-        body = '. '.join(lines[1:3]) if len(lines) > 1 else ''
-        caption = lines[3] if len(lines) > 3 else ''
+        # Split into headline + subtext (≤7 words for headline)
+        sentences = [s.strip() for s in text.replace('. ', '.\n').split('\n') if s.strip()]
+        first = sentences[0] if sentences else title
+        rest = ' '.join(sentences[1:3]) if len(sentences) > 1 else ''
 
-        img = make_studio_slide(
-            idx=i,
-            total=total,
-            eyebrow=f'#{i + 1} of {total}',
-            headline=headline[:80],
-            body=body[:120],
-            caption=caption[:80],
-            image_path=image_path,
-            palette=pal,
+        # Trim headline to ≤7 words
+        words = first.split()
+        if len(words) > 7:
+            headline = ' '.join(words[:7])
+            sub_extra = ' '.join(words[7:])
+            subtext = (sub_extra + ' ' + rest).strip()
+        else:
+            headline = first
+            subtext = rest
+
+        emoji = SCENE_EMOJIS[i % len(SCENE_EMOJIS)]
+
+        img = make_viral_slide(
+            scene_idx=i,
+            total_scenes=total,
+            headline=headline,
+            subtext=subtext[:120],
+            emoji=emoji,
+            accent=accent,
+            is_hook=(i == 0),
         )
+
         frame_path = str(frames_dir / f'frame_{i:02d}.jpg')
-        img.save(frame_path, 'JPEG', quality=96)
-        slide_entries.append((frame_path, scene.get('duration', 5)))
+        img.save(frame_path, 'JPEG', quality=95)
+        slide_entries.append((frame_path, scene.get('duration', SCENE_DURATION)))
+
+    if not slide_entries:
+        return {**state, 'error': 'No frames rendered'}
 
     # Write FFmpeg concat file
     concat_file = video_dir / 'concat.txt'
@@ -291,32 +320,37 @@ def assemble_video_node(state: dict) -> dict:
     final_video = str(video_dir / 'final.mp4')
     ffmpeg = _get_ffmpeg()
 
-    # Ken Burns zoom-pan
+    # Subtle zoom-in per slide (Ken Burns lite — fast enough for short clips)
     vf = (
         'scale=1200:2133:force_original_aspect_ratio=increase,'
         'crop=1080:1920,'
-        "zoompan=z='if(lte(mod(on\\,150)\\,1)\\,1.0\\,min(zoom+0.00035\\,1.07))'"
-        ':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d=150:s=1080x1920:fps=30,'
+        "zoompan=z='if(lte(mod(on,90),1),1.0,min(zoom+0.0004,1.06))'"
+        ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=90:s=1080x1920:fps=30,"
         'setsar=1'
     )
 
-    cmd_video = [
+    cmd = [
         ffmpeg, '-y', '-f', 'concat', '-safe', '0', '-i', str(concat_file),
         '-vf', vf,
-        '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
         '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
         '-t', str(total_sec), raw_video,
     ]
-    r = subprocess.run(cmd_video, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+
     if r.returncode != 0:
-        # Fallback: simple scale
-        cmd_simple = [
+        # Simple scale fallback
+        cmd2 = [
             ffmpeg, '-y', '-f', 'concat', '-safe', '0', '-i', str(concat_file),
-            '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30',
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '17',
-            '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-t', str(total_sec), raw_video,
+            '-vf', (
+                'scale=1080:1920:force_original_aspect_ratio=decrease,'
+                'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30'
+            ),
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+            '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+            '-t', str(total_sec), raw_video,
         ]
-        r2 = subprocess.run(cmd_simple, capture_output=True, text=True)
+        r2 = subprocess.run(cmd2, capture_output=True, text=True)
         if r2.returncode != 0:
             return {**state, 'error': f'FFmpeg error: {r2.stderr[-400:]}'}
 
@@ -337,14 +371,15 @@ def assemble_video_node(state: dict) -> dict:
         import shutil
         shutil.copy(raw_video, final_video)
 
-    # Thumbnail
+    # Thumbnail from frame 0
     thumbnail_path = str(video_dir / 'thumbnail.jpg')
     subprocess.run([
-        ffmpeg, '-y', '-i', final_video, '-ss', '00:00:01',
-        '-vframes', '1', '-vf', 'scale=1280:720', thumbnail_path,
+        ffmpeg, '-y', '-i', final_video,
+        '-ss', '00:00:00.5', '-vframes', '1',
+        '-vf', 'scale=1280:720', thumbnail_path,
     ], capture_output=True)
 
-    print(f'[VideoAssembler] ✅ {final_video}')
+    print(f'[VideoAssembler] ✅ {final_video}  ({total_sec}s, {len(slide_entries)} slides)')
     return {
         **state,
         'video_path': final_video,
