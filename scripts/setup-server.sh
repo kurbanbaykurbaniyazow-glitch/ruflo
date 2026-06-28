@@ -65,12 +65,16 @@ if [ -d ".git" ]; then
     warn "Репозиторий уже существует, обновляем..."
     git pull origin claude/ai-agents-content-automation-fbwwbg 2>/dev/null || true
 else
-    # Prompt for GitHub token if repo is private
-    echo ""
-    echo "Введи GitHub токен (Personal Access Token) для доступа к репозиторию:"
-    echo "Получить: https://github.com/settings/tokens/new (выбери 'repo')"
-    read -s -p "Token: " GITHUB_TOKEN
-    echo ""
+    # Use GITHUB_TOKEN from environment if already set, otherwise prompt
+    if [ -z "$GITHUB_TOKEN" ]; then
+        echo ""
+        echo "Введи GitHub токен (Personal Access Token) для доступа к репозиторию:"
+        echo "Получить: https://github.com/settings/tokens/new (выбери 'repo')"
+        read -s -p "Token: " GITHUB_TOKEN
+        echo ""
+    else
+        echo "Используем GITHUB_TOKEN из окружения..."
+    fi
 
     if [ -n "$GITHUB_TOKEN" ]; then
         git clone --branch claude/ai-agents-content-automation-fbwwbg \
