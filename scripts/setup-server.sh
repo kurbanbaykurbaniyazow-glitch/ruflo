@@ -1,8 +1,20 @@
 #!/bin/bash
 # Ruflo Video Pipeline — Server Setup
-# Ubuntu 22.04 LTS | Run as root
+# Ubuntu 22.04 / 24.04 LTS | Run as root
 
 set -e
+
+# Detect Python version (24.04 = python3.12, 22.04 = python3.11)
+if command -v python3.12 &>/dev/null; then
+    PYTHON_BIN=python3.12
+    PYTHON_PKG="python3.12 python3.12-venv python3-pip"
+elif command -v python3.11 &>/dev/null; then
+    PYTHON_BIN=python3.11
+    PYTHON_PKG="python3.11 python3.11-venv python3-pip"
+else
+    PYTHON_BIN=python3
+    PYTHON_PKG="python3 python3-venv python3-pip"
+fi
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}✅ $1${NC}"; }
@@ -24,15 +36,17 @@ ok "Система обновлена"
 # ── 2. System Dependencies ────────────────────────────────────
 echo "[2/7] Установка системных пакетов..."
 apt-get install -y -q \
-    python3.11 python3.11-venv python3-pip \
+    $PYTHON_PKG \
     git curl wget unzip \
     ffmpeg \
-    flite libflite-dev \
+    flite \
     fonts-ubuntu fonts-liberation2 fonts-dejavu-core \
     fonts-noto-color-emoji \
     supervisor \
     nodejs npm \
     build-essential
+# libflite-dev optional (may not exist on 24.04)
+apt-get install -y -q libflite-dev 2>/dev/null || true
 ok "Системные пакеты установлены"
 
 # ── 3. App Directory ──────────────────────────────────────────
@@ -70,7 +84,7 @@ ok "Код загружен"
 
 # ── 5. Python Environment ─────────────────────────────────────
 echo "[5/7] Настройка Python окружения..."
-python3.11 -m venv /opt/ruflo/venv
+$PYTHON_BIN -m venv /opt/ruflo/venv
 source /opt/ruflo/venv/bin/activate
 
 pip install --upgrade pip -q
