@@ -49,17 +49,26 @@ def _get_ffmpeg() -> str:
 
 
 def _build_query(scene: dict) -> str:
-    """Extract English search terms from scene's image_prompt (avoids Russian text)."""
+    """Get Pexels search query for a scene.
+    Prefers scene['pexels_query'] (set by script_writer per character+mood),
+    falls back to extracting keywords from image_prompt.
+    """
+    # Best source: pre-built query from script_writer (character-specific + mood)
+    if scene.get('pexels_query'):
+        return scene['pexels_query']
+
+    # Fallback: extract English words from image_prompt
     image_prompt = scene.get('image_prompt', '')
     if image_prompt:
         clean = re.sub(r'[,.\-\/]', ' ', image_prompt.lower())
         words = [w for w in clean.split() if w not in _SKIP and len(w) > 2 and w.isalpha()]
         if words:
             return ' '.join(words[:4])
-    # Fallback: generic cinematic queries per scene position
+
+    # Last resort
     idx = scene.get('index', 0)
-    fallbacks = ['cinematic dramatic', 'city night', 'luxury office', 'dramatic confrontation', 'emotional moment', 'subscribe notification']
-    return fallbacks[idx % len(fallbacks)]
+    defaults = ['ship ocean dramatic', 'luxury interior', 'office dramatic', 'courtroom', 'palace throne', 'city rain night']
+    return defaults[idx % len(defaults)]
 
 
 def _search_pexels(query: str, api_key: str) -> dict | None:

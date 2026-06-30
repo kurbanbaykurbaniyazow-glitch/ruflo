@@ -2,17 +2,19 @@
 Portrait image generator for each scene.
 
 Fallback chain:
-  1. DALL-E 3 (1024x1792 portrait)
-  2. DALL-E 2 (1024x1024, resized)
-  3. Pexels Photos API (keyword search, portrait orientation)
+  1. Replicate API — Flux Schnell (fast, cheap, great fruit characters)
+  2. DALL-E 3 (1024x1792 portrait)
+  3. DALL-E 2 (1024x1024, resized)
   4. PIL gradient slide (last resort)
 
 Images are saved as 1080x1920 JPEG.
+Requires one of: REPLICATE_API_KEY or OPENAI_API_KEY
 """
 import json
 import os
 import re
 import ssl
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -139,6 +141,76 @@ def _fetch_pexels_photo(query: str, out_path: Path, api_key: str) -> bool:
         return False
 
 
+def _replicate_flux(prompt: str, api_key: str, out_path: Path) -> bool:
+    """
+    Generate image via Replicate Flux Schnell (fast, cheap, excellent quality).
+    Cost: ~$0.003 per image. Requires REPLICATE_API_KEY.
+    """
+    # Create prediction
+    body = json.dumps({
+        'version': 'black-forest-labs/flux-schnell',
+        'input': {
+            'prompt': prompt,
+            'aspect_ratio': '9:16',
+            'output_format': 'jpg',
+            'output_quality': 90,
+            'num_outputs': 1,
+        },
+    }).encode()
+    req = urllib.request.Request(
+        'https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions',
+        data=body,
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+            'Prefer': 'wait',  # wait up to 60s for result
+        },
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, context=_ssl_ctx(), timeout=90) as r:
+            result = json.loads(r.read().decode())
+    except Exception as e:
+        print(f'[ImageGen] Replicate request failed: {e}')
+        return False
+
+    # If "prefer: wait" didn't resolve, poll
+    prediction_id = result.get('id')
+    output = result.get('output')
+    status = result.get('status', '')
+
+    max_polls = 20
+    for _ in range(max_polls):
+        if status in ('succeeded', 'failed', 'canceled'):
+            break
+        if not prediction_id:
+            break
+        time.sleep(3)
+        poll_req = urllib.request.Request(
+            f'https://api.replicate.com/v1/predictions/{prediction_id}',
+            headers={'Authorization': f'Bearer {api_key}'},
+        )
+        try:
+            with urllib.request.urlopen(poll_req, context=_ssl_ctx(), timeout=15) as r:
+                result = json.loads(r.read().decode())
+            status = result.get('status', '')
+            output = result.get('output')
+        except Exception:
+            break
+
+    if status != 'succeeded' or not output:
+        print(f'[ImageGen] Replicate status: {status}, error: {result.get("error")}')
+        return False
+
+    image_url = output[0] if isinstance(output, list) else output
+    try:
+        _download_image(image_url, out_path)
+        return True
+    except Exception as e:
+        print(f'[ImageGen] Replicate download failed: {e}')
+        return False
+
+
 def _dalle_generate(oai: OpenAI, prompt: str) -> str | None:
     """Try DALL-E 3 then DALL-E 2. Returns image URL or None."""
     try:
@@ -171,9 +243,9 @@ def generate_images_node(state: dict) -> dict:
     LangGraph node: generate one portrait image per scene.
 
     Priority per scene:
-      1. DALL-E 3 (requires OPENAI_API_KEY with image access)
-      2. DALL-E 2 (fallback if DALL-E 3 unavailable)
-      3. Pexels Photos (requires PEXELS_API_KEY)
+      1. Replicate Flux Schnell (requires REPLICATE_API_KEY) — best for fruit characters
+      2. DALL-E 3 (requires OPENAI_API_KEY with image access)
+      3. DALL-E 2 (fallback)
       4. PIL gradient slide (always works)
     """
     scenes: list[dict] = state.get('scenes', [])
@@ -208,9 +280,24 @@ def generate_images_node(state: dict) -> dict:
             image_prompt += ', vertical composition, 9:16 portrait'
 
         saved = False
+        replicate_key = os.environ.get('REPLICATE_API_KEY', '')
 
-        # ── 1. DALL-E ─────────────────────────────────────────────────────────
-        if oai:
+        # ── 1. Replicate Flux Schnell — best for fruit/veggie characters ──────
+        if replicate_key:
+            print(f'[ImageGen] Scene {i+1}: 🍌 Replicate Flux Schnell generating...')
+            raw_path = images_dir / f'scene_{i:02d}_flux.jpg'
+            if _replicate_flux(image_prompt[:1500], replicate_key, raw_path):
+                try:
+                    img = Image.open(str(raw_path)).convert('RGB').resize((W, H), Image.LANCZOS)
+                    img.save(str(out_path), 'JPEG', quality=92)
+                    raw_path.unlink(missing_ok=True)
+                    print(f'[ImageGen] Scene {i+1}: ✅ Replicate Flux → {out_path.name}')
+                    saved = True
+                except Exception as e:
+                    print(f'[ImageGen] Scene {i+1}: Replicate save error: {e}')
+
+        # ── 2. DALL-E 3 / 2 ──────────────────────────────────────────────────
+        if not saved and oai:
             print(f'[ImageGen] Scene {i+1}: DALL-E generating...')
             url = _dalle_generate(oai, image_prompt[:3900])
             if url:
@@ -224,10 +311,10 @@ def generate_images_node(state: dict) -> dict:
                     saved = True
                 except Exception as e:
                     print(f'[ImageGen] Scene {i+1}: DALL-E download/save error: {e}')
-        else:
-            print(f'[ImageGen] Scene {i+1}: ⚠️  no OPENAI_API_KEY — skipping DALL-E')
+        elif not saved:
+            print(f'[ImageGen] Scene {i+1}: ⚠️  no REPLICATE_API_KEY or OPENAI_API_KEY')
 
-        # ── 2. Pexels Photos ──────────────────────────────────────────────────
+        # ── 3. Pexels Photos ──────────────────────────────────────────────────
         if not saved and pexels_key:
             query = _pexels_search_query(image_prompt)
             print(f'[ImageGen] Scene {i+1}: 📷 Pexels Photos "{query}"')

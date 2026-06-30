@@ -82,8 +82,40 @@ CTA_VARIANTS = [
 
 # ── Scene image prompt builder ────────────────────────────────────────────────
 
+# Per-character Pexels search settings: (location_keywords, mood_per_scene_idx)
+_CHARACTER_PEXELS = {
+    'Банан-моряк': {
+        'setting': ['ship deck ocean', 'sailor ship waves', 'stormy sea ship', 'harbor port ship', 'ship cabin dramatic', 'sunset ocean'],
+    },
+    'Клубника-подруга': {
+        'setting': ['luxury penthouse interior', 'fashion girl city', 'stylish rooftop sunset', 'luxury apartment window', 'city lights night', 'confident woman street'],
+    },
+    'Авокадо-босс': {
+        'setting': ['corporate office skyscraper', 'business meeting boardroom', 'executive desk office', 'business deal handshake', 'office dramatic light', 'confident businessman'],
+    },
+    'Помидор-судья': {
+        'setting': ['courtroom dramatic', 'judge gavel court', 'legal trial dramatic', 'courthouse dramatic', 'law dramatic scene', 'justice courtroom'],
+    },
+    'Ананас-король': {
+        'setting': ['throne room palace', 'royal palace interior', 'golden crown dramatic', 'palace hall epic', 'king throne dramatic', 'royal ceremony'],
+    },
+    'Огурец-детектив': {
+        'setting': ['rain city night', 'noir street detective', 'dark alley rain', 'city rain dramatic', 'mystery night street', 'dramatic investigation'],
+    },
+}
+
+_MOOD_QUERIES = [
+    'calm wide establishing',     # scene 0
+    'tense emotional close',      # scene 1
+    'dramatic conflict',          # scene 2
+    'intense action dramatic',    # scene 3
+    'emotional peak dramatic',    # scene 4
+    'direct camera friendly',     # scene 5 (CTA)
+]
+
+
 def _scene_image_prompt(character: dict, scene_text: str, scene_idx: int, total: int) -> str:
-    """Build DALL-E / SD image prompt for a scene."""
+    """Build DALL-E / Flux image prompt for a scene."""
     base = character['image_base']
     if scene_idx == 0:
         mood = 'calm, establishing shot, wide angle'
@@ -95,6 +127,16 @@ def _scene_image_prompt(character: dict, scene_text: str, scene_idx: int, total:
         mood = 'looking directly at camera, breaking fourth wall, friendly expression'
 
     return f'{base}, {mood}, vertical 9:16 format, no text'
+
+
+def _scene_pexels_query(character: dict, scene_idx: int, total: int) -> str:
+    """Build a unique Pexels search query per scene — setting + mood."""
+    name = character.get('name', '')
+    pexels = _CHARACTER_PEXELS.get(name, {})
+    settings = pexels.get('setting', ['dramatic cinematic'])
+    setting = settings[scene_idx % len(settings)]
+    mood = _MOOD_QUERIES[min(scene_idx, len(_MOOD_QUERIES) - 1)]
+    return f'{setting} {mood}'
 
 
 # ── Main generator ────────────────────────────────────────────────────────────
@@ -163,9 +205,10 @@ def generate_story_node(state: dict) -> dict:
     scenes = data.get('scenes', [])
     title = data.get('title', theme)
 
-    # Add image prompts to each scene
+    # Add image prompts + unique Pexels query per scene
     for s in scenes:
         s['image_prompt'] = _scene_image_prompt(character, s['text'], s['index'], len(scenes))
+        s['pexels_query'] = _scene_pexels_query(character, s['index'], len(scenes))
         s['character'] = character['name']
 
     print(f'[ScriptWriter] ✅ "{title}" — {len(scenes)} сцен')
