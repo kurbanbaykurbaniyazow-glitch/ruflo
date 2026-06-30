@@ -346,6 +346,9 @@ def assemble_video_node(state: dict) -> dict:
     has_narration = audio_path and Path(audio_path).exists()
     has_music = music_path and Path(music_path).exists()
 
+    # -movflags +faststart moves moov atom to start of file — required for browser/phone playback
+    faststart = ['-movflags', '+faststart']
+
     if has_narration and has_music:
         mix_f = (
             '[1:a]aresample=44100[narr];'
@@ -358,7 +361,7 @@ def assemble_video_node(state: dict) -> dict:
             '-filter_complex', mix_f,
             '-map', '0:v', '-map', '[aout]',
             '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-shortest',
-            final_video,
+            *faststart, final_video,
         ]
     elif has_narration:
         cmd_mix = [
@@ -366,7 +369,7 @@ def assemble_video_node(state: dict) -> dict:
             '-filter_complex', '[1:a]aresample=44100[aout]',
             '-map', '0:v', '-map', '[aout]',
             '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-shortest',
-            final_video,
+            *faststart, final_video,
         ]
     elif has_music:
         cmd_mix = [
@@ -374,15 +377,19 @@ def assemble_video_node(state: dict) -> dict:
             '-filter_complex', '[1:a]aresample=44100,volume=0.4[aout]',
             '-map', '0:v', '-map', '[aout]',
             '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-shortest',
-            final_video,
+            *faststart, final_video,
         ]
     else:
-        import shutil; shutil.copy(raw_video, final_video)
-        cmd_mix = None
+        # Re-encode without audio but with faststart so browser can play it
+        cmd_mix = [
+            ffmpeg, '-y', '-i', raw_video,
+            '-c:v', 'copy', *faststart, final_video,
+        ]
 
     if cmd_mix:
         r3 = subprocess.run(cmd_mix, capture_output=True, text=True)
         if r3.returncode != 0:
+            print(f'[Assembler] audio mix error: {r3.stderr[-300:]}')
             import shutil; shutil.copy(raw_video, final_video)
 
     # Thumbnail
