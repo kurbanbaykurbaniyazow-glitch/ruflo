@@ -104,7 +104,7 @@ def generate_images_node(state: dict) -> dict:
             continue
 
         try:
-            client = OpenAI(api_key=openai_key)
+            oai = OpenAI(api_key=openai_key)
             prompt = scene.get('image_prompt', '')
             if not prompt:
                 char_base = character.get('image_base', 'a cartoon fruit character')
@@ -114,8 +114,11 @@ def generate_images_node(state: dict) -> dict:
             if '9:16' not in prompt and 'vertical' not in prompt:
                 prompt += ', vertical composition, 9:16 portrait'
 
-            print(f'[ImageGen] Scene {i+1}: generating DALL-E image...')
-            response = client.images.generate(
+            # DALL-E 3 max prompt length is 4000 chars
+            prompt = prompt[:3900]
+
+            print(f'[ImageGen] Scene {i+1}: DALL-E generating...')
+            response = oai.images.generate(
                 model='dall-e-3',
                 prompt=prompt,
                 size='1024x1792',   # portrait 9:16
@@ -140,7 +143,7 @@ def generate_images_node(state: dict) -> dict:
             updated_scenes.append({**scene, 'image_path': str(out_path)})
 
         except Exception as e:
-            print(f'[ImageGen] Scene {i+1}: ❌ DALL-E failed: {e}')
+            print(f'[ImageGen] Scene {i+1}: ❌ DALL-E error: {type(e).__name__}: {e}')
             img = _make_gradient_slide(i, accent)
             img.save(str(out_path), 'JPEG', quality=90)
             updated_scenes.append({**scene, 'image_path': str(out_path)})

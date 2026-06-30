@@ -155,17 +155,18 @@ def _draw_stroked(draw, pos, text, font, fill, stroke=8):
 
 def _make_fallback_slide(text: str, scene_idx: int, total: int,
                           accent: tuple) -> Image.Image:
-    """Gradient slide fallback when no Pexels clip available."""
-    bg = (6, 6, 10)
-    img = Image.new('RGB', (W, H), bg)
+    """Gradient slide fallback when no AI image available."""
+    # Dark-to-accent vibrant gradient (not near-black)
+    bg_top = (20, 10, 40)
+    img = Image.new('RGB', (W, H), bg_top)
     d = ImageDraw.Draw(img)
 
-    # gradient
+    # gradient from dark purple to accent colour
     for y in range(H):
         t = y / H
-        r = int(bg[0] + t * (accent[0]//20))
-        g = int(bg[1] + t * (accent[1]//20))
-        b = int(bg[2] + t * (accent[2]//20))
+        r = int(bg_top[0] + t * max(accent[0] - bg_top[0], 0) * 0.6)
+        g = int(bg_top[1] + t * max(accent[1] - bg_top[1], 0) * 0.6)
+        b = int(bg_top[2] + t * max(accent[2] - bg_top[2], 0) * 0.5)
         d.line([(0, y), (W, y)], fill=(r, g, b))
 
     # Progress bar
