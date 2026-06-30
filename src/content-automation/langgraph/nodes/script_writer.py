@@ -11,9 +11,9 @@ import json
 import os
 import random
 import re
-from anthropic import Anthropic
+from openai import OpenAI
 
-client = Anthropic()
+client = OpenAI()
 
 # ── Character roster ──────────────────────────────────────────────────────────
 
@@ -143,13 +143,13 @@ def generate_story_node(state: dict) -> dict:
 
     print(f'[ScriptWriter] Персонаж: {character["emoji"]} {character["name"]} | Тема: {theme}')
 
-    response = client.messages.create(
-        model='claude-haiku-4-5-20251001',
+    response = client.chat.completions.create(
+        model='gpt-4o-mini',
         max_tokens=1024,
         messages=[{'role': 'user', 'content': prompt}],
     )
 
-    raw = response.content[0].text if response.content else ''
+    raw = response.choices[0].message.content if response.choices else ''
     json_match = re.search(r'\{[\s\S]*\}', raw)
 
     if not json_match:
