@@ -46,7 +46,10 @@ def search_pexels_video(query: str, duration_min: int = 5, duration_max: int = 1
         'size': 'medium',
     })
     url = f'{PEXELS_API}?{params}'
-    req = urllib.request.Request(url, headers={'Authorization': PEXELS_API_KEY})
+    req = urllib.request.Request(url, headers={
+        'Authorization': PEXELS_API_KEY,
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+    })
 
     with urllib.request.urlopen(req, context=_ssl_ctx(), timeout=15) as r:
         data = json.loads(r.read())
