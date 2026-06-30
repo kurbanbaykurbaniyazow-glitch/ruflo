@@ -2,12 +2,11 @@
 Video assembler — professional faceless video style (2026).
 
 Pipeline:
-1. Real stock video clips from Pexels (via video_fetcher.py)
-2. Word-by-word animated captions (CapCut style) via FFmpeg drawtext
-3. Subtle dark overlay for text readability
-4. Top progress bar + brand watermark
-5. Voice narration + lo-fi background music
-6. Fallback to gradient slides if no clips available
+1. AI-generated images (DALL-E) or Pexels clips as background
+2. PIL-rendered captions burned into frames (no FFmpeg drawtext needed)
+3. Top progress bar + brand watermark via PIL
+4. Voice narration + lo-fi background music
+5. Fallback to gradient slides if no images/clips available
 """
 import os
 import re
@@ -212,6 +211,98 @@ def _make_fallback_slide(text: str, scene_idx: int, total: int,
     return img
 
 
+# ─── PIL-based frame composer (no FFmpeg drawtext needed) ────────────────────
+
+def _compose_frame(base_img: Image.Image, text: str, scene_idx: int,
+                   total: int, accent: tuple) -> Image.Image:
+    """
+    Burn caption + progress bar + brand onto a PIL image.
+    Returns a new image ready to be looped into video via FFmpeg.
+    No drawtext filter needed — everything via PIL.
+    """
+    img = base_img.copy().convert('RGB')
+    d = ImageDraw.Draw(img)
+
+    # Semi-transparent dark gradient at bottom for text readability
+    for y in range(H // 2, H):
+        alpha = min(int((y - H // 2) / (H // 2) * 180), 180)
+        r2, g2, b2 = img.getpixel((W // 2, y))[:3]
+        r2 = max(r2 - alpha // 2, 0)
+        g2 = max(g2 - alpha // 2, 0)
+        b2 = max(b2 - alpha // 2, 0)
+        d.line([(0, y), (W, y)], fill=(r2, g2, b2))
+
+    # Progress bar at top
+    bw = W - 80
+    bx, by = 40, 24
+    d.rounded_rectangle([(bx, by), (bx + bw, by + 8)], radius=4,
+                         fill=(*accent, 60))
+    fw = max(int(bw * (scene_idx + 1) / total), 8)
+    d.rounded_rectangle([(bx, by), (bx + fw, by + 8)], radius=4,
+                         fill=accent)
+
+    # Brand handle
+    bf = _find_pil_font(34)
+    d.text((44, 44), BRAND_HANDLE, fill=(*accent, 180), font=bf)
+
+    # Caption text — wrapped, white with black stroke, bottom third
+    if text:
+        font_size = 76
+        cf = _find_pil_font(font_size)
+        dummy = Image.new('RGB', (1, 1))
+        dd = ImageDraw.Draw(dummy)
+
+        # Word wrap
+        lines, cur = [], ''
+        for word in text.upper().split():
+            test = (cur + ' ' + word).strip()
+            if dd.textlength(test, font=cf) <= W - 80:
+                cur = test
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+
+        lh = int(font_size * 1.25)
+        total_h = len(lines) * lh
+        sy = int(H * 0.72) - total_h // 2
+
+        for line in lines:
+            lw = dd.textlength(line, font=cf)
+            x = (W - lw) // 2
+            _draw_stroked(d, (x, sy), line, cf, (255, 255, 255), stroke=8)
+            sy += lh
+
+    return img
+
+
+def _image_to_clip(img: Image.Image, out_path: str, duration: float,
+                   ffmpeg: str) -> bool:
+    """Save PIL image and loop it into an MP4 clip via FFmpeg. No drawtext."""
+    tmp_jpg = out_path.replace('.mp4', '_frame.jpg')
+    img.save(tmp_jpg, 'JPEG', quality=92)
+
+    fps = 30
+    cmd = [
+        ffmpeg, '-y',
+        '-loop', '1', '-i', tmp_jpg,
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+        '-t', str(duration), '-r', str(fps),
+        '-pix_fmt', 'yuv420p', '-an',
+        out_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        Path(tmp_jpg).unlink()
+    except Exception:
+        pass
+    if r.returncode != 0:
+        print(f'[Assembler] image→clip error: {r.stderr[-200:]}')
+    return r.returncode == 0
+
+
 # ─── Main assembler ───────────────────────────────────────────────────────────
 
 def assemble_video_node(state: dict) -> dict:
@@ -241,111 +332,50 @@ def assemble_video_node(state: dict) -> dict:
     for i, scene in enumerate(scenes):
         text = scene.get('text', '').strip()
         duration = float(scene.get('duration', SCENE_DURATION))
-        image_path = scene.get('image_path')   # from DALL-E generator (priority)
-        clip_path = scene.get('clip_path')     # from Pexels fetcher (fallback)
+        image_path = scene.get('image_path')   # DALL-E (priority)
+        clip_path  = scene.get('clip_path')    # Pexels (fallback)
+        out_clip   = str(video_dir / f'scene_{i:02d}.mp4')
 
-        out_clip = str(video_dir / f'scene_{i:02d}.mp4')
-
-        captions = _build_caption_filter(text, duration, accent, font_path)
-        progress = _build_progress_bar_filter(i, total, accent, duration)
-        brand = _build_brand_filter(font_path, accent)
-
-        # ── Priority 1: AI-generated image (DALL-E) ───────────────────────
+        # ── Priority 1: AI-generated image (DALL-E) — PIL captions burned in
         if image_path and Path(image_path).exists():
-            vf_img = (
-                f'loop=loop={int(duration*30)}:size=1:start=0,'
-                'scale=1080:1920:force_original_aspect_ratio=disable,'
-                'setsar=1'
-            )
-            filters_img = [vf_img]
-            if captions:
-                filters_img.append(captions)
-            filters_img.append(progress)
-            filters_img.append(brand)
+            try:
+                base = Image.open(image_path).convert('RGB').resize((W, H), Image.LANCZOS)
+                frame = _compose_frame(base, text, i, total, accent)
+                if _image_to_clip(frame, out_clip, duration, ffmpeg):
+                    scene_clips.append((out_clip, duration))
+                    print(f'[Assembler] Scene {i+1}: ✅ AI image + PIL captions')
+                    continue
+            except Exception as e:
+                print(f'[Assembler] Scene {i+1}: AI image error: {e}')
 
-            cmd = [
-                ffmpeg, '-y', '-i', image_path,
-                '-vf', ','.join(filters_img),
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-                '-pix_fmt', 'yuv420p', '-an', '-t', str(duration),
-                out_clip,
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode == 0:
-                scene_clips.append((out_clip, duration))
-                print(f'[Assembler] Scene {i+1}: ✅ AI image + captions')
-                continue
-            print(f'[Assembler] Scene {i+1}: AI image ffmpeg error: {r.stderr[-300:]}')
-
-        # ── Priority 2: Pexels stock video clip ───────────────────────────
+        # ── Priority 2: Pexels stock clip — extract frame, add PIL captions
         if clip_path and Path(clip_path).exists():
-            overlay = 'drawbox=x=0:y=0:w=iw:h=ih:color=black@0.35:t=fill'
-            filters = [overlay]
-            if captions:
-                filters.append(captions)
-            filters.append(progress)
-            filters.append(brand)
-
-            cmd = [
+            frame_jpg = str(frames_dir / f'clip_frame_{i:02d}.jpg')
+            r = subprocess.run([
                 ffmpeg, '-y', '-i', clip_path,
-                '-vf', ','.join(filters),
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-                '-pix_fmt', 'yuv420p', '-an', '-t', str(duration),
-                out_clip,
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode == 0:
-                scene_clips.append((out_clip, duration))
-                print(f'[Assembler] Scene {i+1}: ✅ Pexels clip + captions')
-                continue
+                '-ss', '0', '-vframes', '1',
+                '-vf', 'scale=1080:1920:force_original_aspect_ratio=disable',
+                frame_jpg,
+            ], capture_output=True)
+            if r.returncode == 0 and Path(frame_jpg).exists():
+                try:
+                    base = Image.open(frame_jpg).convert('RGB').resize((W, H), Image.LANCZOS)
+                    frame = _compose_frame(base, text, i, total, accent)
+                    if _image_to_clip(frame, out_clip, duration, ffmpeg):
+                        scene_clips.append((out_clip, duration))
+                        print(f'[Assembler] Scene {i+1}: ✅ Pexels frame + PIL captions')
+                        continue
+                except Exception as e:
+                    print(f'[Assembler] Scene {i+1}: Pexels frame error: {e}')
 
-            # Retry without captions
-            cmd_nocap = [
-                ffmpeg, '-y', '-i', clip_path,
-                '-vf', f'{overlay},{progress},{brand}',
-                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-                '-pix_fmt', 'yuv420p', '-an', '-t', str(duration),
-                out_clip,
-            ]
-            r2 = subprocess.run(cmd_nocap, capture_output=True, text=True)
-            if r2.returncode == 0:
-                scene_clips.append((out_clip, duration))
-                print(f'[Assembler] Scene {i+1}: ✅ Pexels clip (no captions)')
-                continue
-            print(f'[Assembler] Scene {i+1}: clip failed: {r2.stderr[-200:]}')
-
-        # ── Priority 3: PIL gradient slide fallback ───────────────────────
-        img = _make_fallback_slide('', i, total, accent)
-        img_path = str(frames_dir / f'slide_{i:02d}.jpg')
-        img.save(img_path, 'JPEG', quality=95)
-
-        # Word-by-word captions overlaid on slide via FFmpeg drawtext (no zoompan — saves RAM)
-        captions = _build_caption_filter(text, duration, accent, font_path, font_size=88)
-        vf_slide = (
-            f'loop=loop={int(duration*30)}:size=1:start=0,'
-            'scale=1080:1920:force_original_aspect_ratio=disable,'
-            'setsar=1'
-        )
-        if captions:
-            vf_slide = vf_slide + ',' + captions
-
-        cmd_slide = [
-            ffmpeg, '-y', '-i', img_path,
-            '-vf', vf_slide,
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-            '-pix_fmt', 'yuv420p', '-an', '-t', str(duration),
-            out_clip,
-        ]
-        r2 = subprocess.run(cmd_slide, capture_output=True, text=True)
-        if r2.returncode != 0:
-            cmd_simple = [
-                ffmpeg, '-y', '-loop', '1', '-i', img_path,
-                '-c:v', 'libx264', '-t', str(duration), '-r', '30',
-                '-pix_fmt', 'yuv420p', '-an', out_clip,
-            ]
-            subprocess.run(cmd_simple, capture_output=True)
-        scene_clips.append((out_clip, duration))
-        print(f'[Assembler] Scene {i+1}: 🖼 slide + animated captions')
+        # ── Priority 3: PIL gradient slide ────────────────────────────────
+        base = _make_fallback_slide('', i, total, accent)
+        frame = _compose_frame(base, text, i, total, accent)
+        if _image_to_clip(frame, out_clip, duration, ffmpeg):
+            scene_clips.append((out_clip, duration))
+            print(f'[Assembler] Scene {i+1}: 🖼 gradient slide + PIL captions')
+        else:
+            print(f'[Assembler] Scene {i+1}: ❌ all methods failed')
 
     if not scene_clips:
         return {**state, 'error': 'No scene clips rendered'}
