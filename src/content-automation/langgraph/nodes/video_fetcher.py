@@ -99,23 +99,22 @@ def prepare_clip(raw_path: Path, output_path: Path, duration: int, scene_idx: in
     """
     ffmpeg = _get_ffmpeg()
 
-    # Crop to portrait 9:16, scale to 1080x1920, trim, 30fps
+    # Crop to portrait 9:16, scale to 1080x1920, trim — no zoompan (saves RAM)
     vf = (
         'scale=iw*max(1080/iw\\,1920/ih):ih*max(1080/iw\\,1920/ih),'
         'crop=1080:1920,'
-        "zoompan=z='min(zoom+0.0003,1.05)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-        f":d={duration * 30}:s=1080x1920:fps=30,"
         'setsar=1'
     )
 
     cmd = [
         ffmpeg, '-y',
-        '-ss', str(scene_idx % 3),   # slight offset to avoid identical starts
+        '-ss', str(scene_idx % 3),
         '-i', str(raw_path),
         '-t', str(duration),
         '-vf', vf,
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-        '-an',                        # remove original audio
+        '-r', '30',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+        '-an',
         '-pix_fmt', 'yuv420p',
         str(output_path),
     ]
