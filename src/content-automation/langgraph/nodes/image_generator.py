@@ -1,94 +1,148 @@
+"""
+DALL-E 3 image generator — portrait 9:16 AI images for each scene.
+
+Generates one image per scene using the character + story context.
+Images are 1024x1792 (portrait TikTok/Shorts format).
+Falls back to PIL gradient slide if DALL-E fails or key missing.
+"""
 import os
-import httpx
+import ssl
+import urllib.request
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 from openai import OpenAI
 
-client = OpenAI()
 OUTPUT_DIR = Path(os.getenv('VIDEO_OUTPUT_DIR', '/tmp/content-automation'))
+W, H = 1080, 1920
 
 
-def generate_image_node(state: dict) -> dict:
-    """LangGraph node: generate images for each scene using DALL-E 3."""
+def _ssl_ctx() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    ca = '/root/.ccr/ca-bundle.crt'
+    if os.path.exists(ca):
+        ctx.load_verify_locations(ca)
+    return ctx
+
+
+def _find_font(size: int) -> ImageFont.ImageFont:
+    for p in [
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    ]:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
+
+def _make_gradient_slide(scene_idx: int, accent: tuple) -> Image.Image:
+    """Gradient background slide as DALL-E fallback."""
+    bg = (8, 8, 14)
+    img = Image.new('RGB', (W, H), bg)
+    d = ImageDraw.Draw(img)
+    for y in range(H):
+        t = y / H
+        r = int(bg[0] + t * (accent[0] // 12))
+        g = int(bg[1] + t * (accent[1] // 12))
+        b = int(bg[2] + t * (accent[2] // 12))
+        d.line([(0, y), (W, y)], fill=(r, g, b))
+    return img
+
+
+def _download_image(url: str, out_path: Path) -> None:
+    req = urllib.request.Request(
+        url,
+        headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'},
+    )
+    with urllib.request.urlopen(req, context=_ssl_ctx(), timeout=60) as r:
+        data = r.read()
+    out_path.write_bytes(data)
+
+
+ACCENT_COLORS = [
+    (255, 230, 0),
+    (0, 230, 120),
+    (100, 180, 255),
+    (255, 80, 120),
+    (200, 120, 255),
+]
+
+
+def generate_images_node(state: dict) -> dict:
+    """
+    LangGraph node: generate one DALL-E 3 portrait image per scene.
+    Adds 'image_path' to each scene dict.
+    """
     scenes: list[dict] = state.get('scenes', [])
     content_id: str = state.get('content_id', 'default')
-
-    if not scenes:
-        return {**state, 'error': 'No scenes to generate images for'}
+    character: dict = state.get('character', {})
+    openai_key = os.environ.get('OPENAI_API_KEY', '')
 
     images_dir = OUTPUT_DIR / content_id / 'images'
     images_dir.mkdir(parents=True, exist_ok=True)
 
+    accent = ACCENT_COLORS[hash(content_id) % len(ACCENT_COLORS)]
     updated_scenes = []
-    for scene in scenes:
-        image_path = images_dir / f"scene_{scene['index']:02d}.png"
 
-        if image_path.exists():
-            # Reuse cached image
-            updated_scenes.append({**scene, 'image_path': str(image_path)})
+    for i, scene in enumerate(scenes):
+        out_path = images_dir / f'scene_{i:02d}.jpg'
+
+        # Use cached image if exists
+        if out_path.exists() and out_path.stat().st_size > 10_000:
+            print(f'[ImageGen] Scene {i+1}: ♻️  cached')
+            updated_scenes.append({**scene, 'image_path': str(out_path)})
+            continue
+
+        if not openai_key:
+            print(f'[ImageGen] Scene {i+1}: ⚠️  no OPENAI_API_KEY — using gradient slide')
+            img = _make_gradient_slide(i, accent)
+            img.save(str(out_path), 'JPEG', quality=90)
+            updated_scenes.append({**scene, 'image_path': str(out_path)})
             continue
 
         try:
+            client = OpenAI(api_key=openai_key)
+            prompt = scene.get('image_prompt', '')
+            if not prompt:
+                char_base = character.get('image_base', 'a cartoon fruit character')
+                prompt = f'{char_base}, scene {i+1}, photorealistic 3D render, cinematic, vertical 9:16'
+
+            # Ensure portrait format hint in prompt
+            if '9:16' not in prompt and 'vertical' not in prompt:
+                prompt += ', vertical composition, 9:16 portrait'
+
+            print(f'[ImageGen] Scene {i+1}: generating DALL-E image...')
             response = client.images.generate(
                 model='dall-e-3',
-                prompt=f"{scene['image_prompt']}\nStyle: cinematic, 16:9 aspect ratio, high quality, professional",
-                size='1792x1024',
+                prompt=prompt,
+                size='1024x1792',   # portrait 9:16
                 quality='standard',
                 n=1,
             )
+            url = response.data[0].url
+            if not url:
+                raise ValueError('No URL returned')
 
-            image_url = response.data[0].url
-            if not image_url:
-                raise ValueError('No image URL returned from DALL-E')
+            # Download and convert to JPEG at 1080x1920
+            raw_path = images_dir / f'scene_{i:02d}_raw.png'
+            _download_image(url, raw_path)
 
-            # Download image
-            with httpx.Client() as http_client:
-                img_response = http_client.get(image_url, timeout=30)
-                img_response.raise_for_status()
-                image_path.write_bytes(img_response.content)
+            # Resize to exact 1080x1920
+            img = Image.open(str(raw_path)).convert('RGB')
+            img = img.resize((W, H), Image.LANCZOS)
+            img.save(str(out_path), 'JPEG', quality=92)
+            raw_path.unlink(missing_ok=True)
 
-            print(f'[ImageGen] Generated scene {scene["index"]}: {image_path.name}')
-            updated_scenes.append({**scene, 'image_path': str(image_path)})
+            print(f'[ImageGen] Scene {i+1}: ✅ {out_path.name}')
+            updated_scenes.append({**scene, 'image_path': str(out_path)})
 
         except Exception as e:
-            print(f'[ImageGen] Failed scene {scene["index"]}: {e}')
-            # Use placeholder image
-            placeholder = _create_placeholder(scene['text'], image_path)
-            updated_scenes.append({**scene, 'image_path': str(placeholder)})
+            print(f'[ImageGen] Scene {i+1}: ❌ DALL-E failed: {e}')
+            img = _make_gradient_slide(i, accent)
+            img.save(str(out_path), 'JPEG', quality=90)
+            updated_scenes.append({**scene, 'image_path': str(out_path)})
 
-    return {**state, 'scenes': updated_scenes, 'error': None}
-
-
-def _create_placeholder(text: str, output_path: Path) -> Path:
-    """Create a simple text-on-dark-background placeholder image."""
-    from PIL import Image, ImageDraw, ImageFont
-
-    img = Image.new('RGB', (1792, 1024), color=(20, 20, 20))
-    draw = ImageDraw.Draw(img)
-
-    # Try to load a font, fall back to default
-    try:
-        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 48)
-    except OSError:
-        font = ImageFont.load_default()
-
-    # Word wrap text
-    words = text.split()
-    lines = []
-    current_line = []
-    for word in words:
-        current_line.append(word)
-        if len(' '.join(current_line)) > 50:
-            lines.append(' '.join(current_line[:-1]))
-            current_line = [word]
-    if current_line:
-        lines.append(' '.join(current_line))
-
-    y = 1024 // 2 - len(lines) * 30
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        w = bbox[2] - bbox[0]
-        draw.text(((1792 - w) // 2, y), line, fill='white', font=font)
-        y += 70
-
-    img.save(str(output_path))
-    return output_path
+    return {**state, 'scenes': updated_scenes}

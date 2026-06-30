@@ -2,7 +2,8 @@
 """
 Полный пайплайн генерации вирального видео.
 
-Формат: AI-персонаж (фрукт/овощ) + история со смыслом + субтитры + CTA в конце.
+Формат: Claude AI пишет историю → DALL-E рисует персонажа →
+        TTS озвучивает → музыка → FFmpeg собирает финальное видео.
 """
 import sys, os, uuid
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'content-automation', 'langgraph'))
@@ -18,7 +19,7 @@ if os.path.exists(env_path):
                 os.environ.setdefault(k.strip(), v.strip())
 
 from nodes.script_writer import generate_story_node
-from nodes.video_fetcher import fetch_videos_node
+from nodes.image_generator import generate_images_node
 from nodes.tts_generator import generate_tts_node
 from nodes.music_generator import generate_music_node
 from nodes.video_assembler import assemble_video_node
@@ -32,35 +33,48 @@ state = {
     'script': '',
 }
 
-has_pexels = bool(os.environ.get('PEXELS_API_KEY'))
 has_anthropic = bool(os.environ.get('ANTHROPIC_API_KEY'))
+has_openai    = bool(os.environ.get('OPENAI_API_KEY'))
 
 print('=' * 60)
 print('  Виральный видео пайплайн — AI персонажи')
-print(f'  Claude AI: {"✅" if has_anthropic else "❌"}  |  Pexels: {"✅" if has_pexels else "❌ (слайды)"}')
+print(f'  Claude AI : {"✅" if has_anthropic else "❌ нет ключа"}')
+print(f'  DALL-E 3  : {"✅" if has_openai else "⚠️  нет ключа (градиент)"}')
+print(f'  ID        : {CONTENT_ID}')
 print('=' * 60)
 
-print('\n[1/5] Генерация сценария...')
+# ── Шаг 1: Сценарий ─────────────────────────────────────────────────────────
+print('\n[1/5] 📝 Генерация сценария (Claude AI)...')
 state = generate_story_node(state)
 if state.get('error'):
     print(f'  ❌  {state["error"]}')
     sys.exit(1)
-print(f'  ✅  "{state["title"]}" — {len(state["scenes"])} сцен')
+char_name = state.get('character', {}).get('name', '?')
+print(f'  ✅  "{state["title"]}"')
+print(f'  🎭  Персонаж: {char_name}')
+print(f'  📖  Тема: {state.get("theme", "")}')
+print()
+for s in state['scenes']:
+    print(f'     Сцена {s["index"]+1}: {s["text"]}')
 
-print('\n[2/5] Загрузка видеоклипов (Pexels)...')
-state = fetch_videos_node(state)
-clips_ok = sum(1 for s in state['scenes'] if s.get('clip_path'))
-print(f'  {"✅" if clips_ok else "⚠️"}  Клипов: {clips_ok}/{len(state["scenes"])}')
+# ── Шаг 2: AI картинки ──────────────────────────────────────────────────────
+print('\n[2/5] 🎨 Генерация AI картинок (DALL-E 3)...')
+state = generate_images_node(state)
+imgs_ok = sum(1 for s in state['scenes'] if s.get('image_path'))
+print(f'  {"✅" if imgs_ok == len(state["scenes"]) else "⚠️"}  Картинок: {imgs_ok}/{len(state["scenes"])}')
 
-print('\n[3/5] Голос персонажа (TTS)...')
+# ── Шаг 3: Голос ────────────────────────────────────────────────────────────
+print('\n[3/5] 🎙  Голос персонажа (TTS)...')
 state = generate_tts_node(state)
 print(f'  {"✅" if state.get("audio_path") else "⚠️"}  {state.get("audio_path", "нет")}')
 
-print('\n[4/5] Фоновая музыка...')
+# ── Шаг 4: Музыка ───────────────────────────────────────────────────────────
+print('\n[4/5] 🎵 Фоновая музыка...')
 state = generate_music_node(state)
 print(f'  {"✅" if state.get("music_path") else "⚠️"}  {state.get("music_path", "нет")}')
 
-print('\n[5/5] Сборка финального видео...')
+# ── Шаг 5: Сборка ───────────────────────────────────────────────────────────
+print('\n[5/5] 🎬 Сборка финального видео...')
 state = assemble_video_node(state)
 
 if state.get('error'):
@@ -72,13 +86,13 @@ sz_mb = os.path.getsize(video) / 1024 / 1024
 
 print()
 print('=' * 60)
-print(f'  ✅  Готово!')
+print(f'  ✅  ГОТОВО!')
 print(f'  📁  {video}')
-print(f'  📦  Размер: {sz_mb:.1f} MB')
-print(f'  🎭  Персонаж: {state.get("character", {}).get("name", "?")}')
-print(f'  📖  История: {state["title"]}')
+print(f'  📦  {sz_mb:.1f} MB')
+print(f'  🎭  {char_name}')
+print(f'  📖  {state["title"]}')
 print('=' * 60)
 print()
 print('  Смотри видео:')
 print('  python3 -m http.server 8080 --directory /var/data/ruflo-videos')
-print(f'  http://46.101.135.99:8080/{CONTENT_ID}/')
+print(f'  Открой: http://46.101.135.99:8080/{CONTENT_ID}/')

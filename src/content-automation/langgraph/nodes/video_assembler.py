@@ -240,27 +240,31 @@ def assemble_video_node(state: dict) -> dict:
     for i, scene in enumerate(scenes):
         text = scene.get('text', '').strip()
         duration = float(scene.get('duration', SCENE_DURATION))
-        clip_path = scene.get('clip_path')  # from video_fetcher
+        image_path = scene.get('image_path')   # from DALL-E generator (priority)
+        clip_path = scene.get('clip_path')     # from Pexels fetcher (fallback)
 
         out_clip = str(video_dir / f'scene_{i:02d}.mp4')
 
-        if clip_path and Path(clip_path).exists():
-            # ── Real video clip path ──────────────────────────────────────
-            # Build filter: dark overlay + captions + progress bar + brand
-            overlay = 'drawbox=x=0:y=0:w=iw:h=ih:color=black@0.35:t=fill'
-            captions = _build_caption_filter(text, duration, accent, font_path)
-            progress = _build_progress_bar_filter(i, total, accent, duration)
-            brand = _build_brand_filter(font_path, accent)
+        captions = _build_caption_filter(text, duration, accent, font_path)
+        progress = _build_progress_bar_filter(i, total, accent, duration)
+        brand = _build_brand_filter(font_path, accent)
 
-            filters = [overlay]
-            if captions: filters.append(captions)
-            filters.append(progress)
-            filters.append(brand)
-            vf = ','.join(filters)
+        # ── Priority 1: AI-generated image (DALL-E) ───────────────────────
+        if image_path and Path(image_path).exists():
+            vf_img = (
+                f'loop=loop={int(duration*30)}:size=1:start=0,'
+                'scale=1080:1920:force_original_aspect_ratio=disable,'
+                'setsar=1'
+            )
+            filters_img = [vf_img]
+            if captions:
+                filters_img.append(captions)
+            filters_img.append(progress)
+            filters_img.append(brand)
 
             cmd = [
-                ffmpeg, '-y', '-i', clip_path,
-                '-vf', vf,
+                ffmpeg, '-y', '-i', image_path,
+                '-vf', ','.join(filters_img),
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
                 '-pix_fmt', 'yuv420p', '-an', '-t', str(duration),
                 out_clip,
@@ -268,11 +272,33 @@ def assemble_video_node(state: dict) -> dict:
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode == 0:
                 scene_clips.append((out_clip, duration))
-                print(f'[Assembler] Scene {i+1}: ✅ video clip + captions')
+                print(f'[Assembler] Scene {i+1}: ✅ AI image + captions')
                 continue
-            print(f'[Assembler] Scene {i+1}: ffmpeg error: {r.stderr[-500:]}')
+            print(f'[Assembler] Scene {i+1}: AI image ffmpeg error: {r.stderr[-300:]}')
 
-            # Retry without captions (overlay too complex) — still use real clip
+        # ── Priority 2: Pexels stock video clip ───────────────────────────
+        if clip_path and Path(clip_path).exists():
+            overlay = 'drawbox=x=0:y=0:w=iw:h=ih:color=black@0.35:t=fill'
+            filters = [overlay]
+            if captions:
+                filters.append(captions)
+            filters.append(progress)
+            filters.append(brand)
+
+            cmd = [
+                ffmpeg, '-y', '-i', clip_path,
+                '-vf', ','.join(filters),
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+                '-pix_fmt', 'yuv420p', '-an', '-t', str(duration),
+                out_clip,
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                scene_clips.append((out_clip, duration))
+                print(f'[Assembler] Scene {i+1}: ✅ Pexels clip + captions')
+                continue
+
+            # Retry without captions
             cmd_nocap = [
                 ffmpeg, '-y', '-i', clip_path,
                 '-vf', f'{overlay},{progress},{brand}',
@@ -283,12 +309,11 @@ def assemble_video_node(state: dict) -> dict:
             r2 = subprocess.run(cmd_nocap, capture_output=True, text=True)
             if r2.returncode == 0:
                 scene_clips.append((out_clip, duration))
-                print(f'[Assembler] Scene {i+1}: ✅ video clip (no captions)')
+                print(f'[Assembler] Scene {i+1}: ✅ Pexels clip (no captions)')
                 continue
-            print(f'[Assembler] Scene {i+1}: clip failed too: {r2.stderr[-200:]}')
+            print(f'[Assembler] Scene {i+1}: clip failed: {r2.stderr[-200:]}')
 
-        # ── PIL slide fallback with animated captions ────────────────────
-        # Clean background slide (no text — text will be overlaid via FFmpeg)
+        # ── Priority 3: PIL gradient slide fallback ───────────────────────
         img = _make_fallback_slide('', i, total, accent)
         img_path = str(frames_dir / f'slide_{i:02d}.jpg')
         img.save(img_path, 'JPEG', quality=95)
