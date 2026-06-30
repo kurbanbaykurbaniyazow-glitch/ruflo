@@ -2,7 +2,7 @@
 """
 Полный пайплайн генерации вирального видео.
 
-Формат: Claude AI пишет историю → DALL-E рисует персонажа →
+Формат: GPT-4o-mini пишет историю → Pexels качает видеоклипы →
         TTS озвучивает → музыка → FFmpeg собирает финальное видео.
 """
 import sys, os, uuid
@@ -19,6 +19,7 @@ if os.path.exists(env_path):
                 os.environ.setdefault(k.strip(), v.strip())
 
 from nodes.script_writer import generate_story_node
+from nodes.video_fetcher import fetch_videos_node
 from nodes.image_generator import generate_images_node
 from nodes.tts_generator import generate_tts_node
 from nodes.music_generator import generate_music_node
@@ -33,18 +34,19 @@ state = {
     'script': '',
 }
 
-has_anthropic = bool(os.environ.get('ANTHROPIC_API_KEY'))
-has_openai    = bool(os.environ.get('OPENAI_API_KEY'))
+has_openai  = bool(os.environ.get('OPENAI_API_KEY'))
+has_pexels  = bool(os.environ.get('PEXELS_API_KEY'))
 
 print('=' * 60)
 print('  Виральный видео пайплайн — AI персонажи')
-print(f'  Claude AI : {"✅" if has_anthropic else "❌ нет ключа"}')
-print(f'  DALL-E 3  : {"✅" if has_openai else "⚠️  нет ключа (градиент)"}')
-print(f'  ID        : {CONTENT_ID}')
+print(f'  OpenAI (GPT + TTS) : {"✅" if has_openai else "❌ нет ключа"}')
+print(f'  DALL-E 3           : {"✅ (если доступен)" if has_openai else "❌"}')
+print(f'  Pexels Видео       : {"✅" if has_pexels else "❌ нет ключа"}')
+print(f'  ID                 : {CONTENT_ID}')
 print('=' * 60)
 
 # ── Шаг 1: Сценарий ─────────────────────────────────────────────────────────
-print('\n[1/5] 📝 Генерация сценария (Claude AI)...')
+print('\n[1/6] 📝 Генерация сценария (GPT-4o-mini)...')
 state = generate_story_node(state)
 if state.get('error'):
     print(f'  ❌  {state["error"]}')
@@ -57,24 +59,34 @@ print()
 for s in state['scenes']:
     print(f'     Сцена {s["index"]+1}: {s["text"]}')
 
-# ── Шаг 2: AI картинки ──────────────────────────────────────────────────────
-print('\n[2/5] 🎨 Генерация AI картинок (DALL-E 3)...')
-state = generate_images_node(state)
-imgs_ok = sum(1 for s in state['scenes'] if s.get('image_path'))
-print(f'  {"✅" if imgs_ok == len(state["scenes"]) else "⚠️"}  Картинок: {imgs_ok}/{len(state["scenes"])}')
+# ── Шаг 2: Pexels видеоклипы ────────────────────────────────────────────────
+print('\n[2/6] 🎬 Загрузка Pexels видеоклипов...')
+state = fetch_videos_node(state)
+clips_ok = sum(1 for s in state['scenes'] if s.get('clip_path'))
+print(f'  {"✅" if clips_ok == len(state["scenes"]) else "⚠️"}  Клипов: {clips_ok}/{len(state["scenes"])}')
 
-# ── Шаг 3: Голос ────────────────────────────────────────────────────────────
-print('\n[3/5] 🎙  Голос персонажа (TTS)...')
+# ── Шаг 3: AI картинки (запасной вариант если нет клипа) ────────────────────
+missing = len(state['scenes']) - clips_ok
+if missing > 0:
+    print(f'\n[3/6] 🎨 DALL-E для {missing} сцен без клипа...')
+    state = generate_images_node(state)
+    imgs_ok = sum(1 for s in state['scenes'] if s.get('image_path'))
+    print(f'  {"✅" if imgs_ok else "⚠️"}  Картинок: {imgs_ok}/{len(state["scenes"])}')
+else:
+    print('\n[3/6] 🎨 Все сцены имеют видеоклипы — пропускаем DALL-E')
+
+# ── Шаг 4: Голос ────────────────────────────────────────────────────────────
+print('\n[4/6] 🎙  Голос персонажа (TTS)...')
 state = generate_tts_node(state)
 print(f'  {"✅" if state.get("audio_path") else "⚠️"}  {state.get("audio_path", "нет")}')
 
-# ── Шаг 4: Музыка ───────────────────────────────────────────────────────────
-print('\n[4/5] 🎵 Фоновая музыка...')
+# ── Шаг 5: Музыка ───────────────────────────────────────────────────────────
+print('\n[5/6] 🎵 Фоновая музыка...')
 state = generate_music_node(state)
 print(f'  {"✅" if state.get("music_path") else "⚠️"}  {state.get("music_path", "нет")}')
 
-# ── Шаг 5: Сборка ───────────────────────────────────────────────────────────
-print('\n[5/5] 🎬 Сборка финального видео...')
+# ── Шаг 6: Сборка ───────────────────────────────────────────────────────────
+print('\n[6/6] 🔧 Сборка финального видео...')
 state = assemble_video_node(state)
 
 if state.get('error'):

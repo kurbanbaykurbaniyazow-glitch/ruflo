@@ -304,6 +304,100 @@ def _image_to_clip(img: Image.Image, out_path: str, duration: float,
     return r.returncode == 0
 
 
+# ─── Caption overlay for live video clips ────────────────────────────────────
+
+def _make_caption_overlay(text: str, scene_idx: int, total: int,
+                           accent: tuple) -> Image.Image:
+    """
+    Create a transparent RGBA PNG with captions.
+    Used as FFmpeg overlay on top of live video clips.
+    """
+    img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    # Semi-transparent dark strip at bottom for text readability
+    strip_top = int(H * 0.60)
+    for y in range(strip_top, H):
+        alpha = min(int((y - strip_top) / (H - strip_top) * 170), 170)
+        d.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
+
+    # Progress bar at top
+    bw = W - 80
+    bx, by = 40, 24
+    d.rounded_rectangle([(bx, by), (bx + bw, by + 8)], radius=4,
+                         fill=(*accent, 50))
+    fw = max(int(bw * (scene_idx + 1) / total), 8)
+    d.rounded_rectangle([(bx, by), (bx + fw, by + 8)], radius=4,
+                         fill=(*accent, 255))
+
+    # Brand handle
+    bf = _find_pil_font(34)
+    d.text((44, 44), BRAND_HANDLE, fill=(*accent, 210), font=bf)
+
+    # Caption text — white with black stroke
+    if text:
+        font_size = 76
+        cf = _find_pil_font(font_size)
+        dummy = Image.new('RGB', (1, 1))
+        dd = ImageDraw.Draw(dummy)
+
+        lines, cur = [], ''
+        for word in text.upper().split():
+            test = (cur + ' ' + word).strip()
+            if dd.textlength(test, font=cf) <= W - 80:
+                cur = test
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+
+        lh = int(font_size * 1.25)
+        total_h = len(lines) * lh
+        sy = int(H * 0.72) - total_h // 2
+
+        for line in lines:
+            lw = dd.textlength(line, font=cf)
+            x = (W - lw) // 2
+            # Black stroke
+            stroke = 7
+            for dx in range(-stroke, stroke + 1, 3):
+                for dy in range(-stroke, stroke + 1, 3):
+                    if dx or dy:
+                        d.text((x + dx, sy + dy), line, font=cf, fill=(0, 0, 0, 255))
+            d.text((x, sy), line, font=cf, fill=(255, 255, 255, 255))
+            sy += lh
+
+    return img
+
+
+def _overlay_on_clip(clip_path: str, overlay: Image.Image, out_path: str,
+                     duration: float, ffmpeg: str) -> bool:
+    """Composite a transparent PIL RGBA overlay on top of a video clip."""
+    tmp_png = out_path.replace('.mp4', '_ov.png')
+    overlay.save(tmp_png, 'PNG')
+
+    cmd = [
+        ffmpeg, '-y',
+        '-i', clip_path,
+        '-i', tmp_png,
+        '-filter_complex', '[0:v][1:v]overlay=0:0',
+        '-t', str(duration),
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+        '-pix_fmt', 'yuv420p', '-an',
+        out_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        Path(tmp_png).unlink()
+    except Exception:
+        pass
+    if r.returncode != 0:
+        print(f'[Assembler] overlay error: {r.stderr[-200:]}')
+    return r.returncode == 0
+
+
 # ─── Main assembler ───────────────────────────────────────────────────────────
 
 def assemble_video_node(state: dict) -> dict:
@@ -319,11 +413,8 @@ def assemble_video_node(state: dict) -> dict:
 
     video_dir = OUTPUT_DIR / content_id
     video_dir.mkdir(parents=True, exist_ok=True)
-    frames_dir = video_dir / 'frames'
-    frames_dir.mkdir(exist_ok=True)
 
     accent = ACCENT_COLORS[hash(content_id) % len(ACCENT_COLORS)]
-    font_path = _find_font(80)
     ffmpeg = _get_ffmpeg()
     total = len(scenes)
 
@@ -333,11 +424,22 @@ def assemble_video_node(state: dict) -> dict:
     for i, scene in enumerate(scenes):
         text = scene.get('text', '').strip()
         duration = float(scene.get('duration', SCENE_DURATION))
-        image_path = scene.get('image_path')   # DALL-E (priority)
-        clip_path  = scene.get('clip_path')    # Pexels (fallback)
+        clip_path  = scene.get('clip_path')    # Pexels video (priority 1)
+        image_path = scene.get('image_path')   # DALL-E image (priority 2)
         out_clip   = str(video_dir / f'scene_{i:02d}.mp4')
 
-        # ── Priority 1: AI-generated image (DALL-E) — PIL captions burned in
+        # ── Priority 1: Pexels video clip — PIL caption overlay (preserves motion)
+        if clip_path and Path(clip_path).exists():
+            try:
+                overlay = _make_caption_overlay(text, i, total, accent)
+                if _overlay_on_clip(clip_path, overlay, out_clip, duration, ffmpeg):
+                    scene_clips.append((out_clip, duration))
+                    print(f'[Assembler] Scene {i+1}: ✅ Pexels video + caption overlay')
+                    continue
+            except Exception as e:
+                print(f'[Assembler] Scene {i+1}: Pexels overlay error: {e}')
+
+        # ── Priority 2: AI-generated image (DALL-E) — PIL captions burned in
         if image_path and Path(image_path).exists():
             try:
                 base = Image.open(image_path).convert('RGB').resize((W, H), Image.LANCZOS)
@@ -349,27 +451,7 @@ def assemble_video_node(state: dict) -> dict:
             except Exception as e:
                 print(f'[Assembler] Scene {i+1}: AI image error: {e}')
 
-        # ── Priority 2: Pexels stock clip — extract frame, add PIL captions
-        if clip_path and Path(clip_path).exists():
-            frame_jpg = str(frames_dir / f'clip_frame_{i:02d}.jpg')
-            r = subprocess.run([
-                ffmpeg, '-y', '-i', clip_path,
-                '-ss', '0', '-vframes', '1',
-                '-vf', 'scale=1080:1920:force_original_aspect_ratio=disable',
-                frame_jpg,
-            ], capture_output=True)
-            if r.returncode == 0 and Path(frame_jpg).exists():
-                try:
-                    base = Image.open(frame_jpg).convert('RGB').resize((W, H), Image.LANCZOS)
-                    frame = _compose_frame(base, text, i, total, accent)
-                    if _image_to_clip(frame, out_clip, duration, ffmpeg):
-                        scene_clips.append((out_clip, duration))
-                        print(f'[Assembler] Scene {i+1}: ✅ Pexels frame + PIL captions')
-                        continue
-                except Exception as e:
-                    print(f'[Assembler] Scene {i+1}: Pexels frame error: {e}')
-
-        # ── Priority 3: PIL gradient slide ────────────────────────────────
+        # ── Priority 3: PIL gradient slide ────────────────────────────────────
         base = _make_fallback_slide('', i, total, accent)
         frame = _compose_frame(base, text, i, total, accent)
         if _image_to_clip(frame, out_clip, duration, ffmpeg):
