@@ -118,13 +118,22 @@ def generate_images_node(state: dict) -> dict:
             prompt = prompt[:3900]
 
             print(f'[ImageGen] Scene {i+1}: DALL-E generating...')
-            response = oai.images.generate(
-                model='dall-e-3',
-                prompt=prompt,
-                size='1024x1792',   # portrait 9:16
-                quality='standard',
-                n=1,
-            )
+            # Try DALL-E 3 first (portrait 9:16), fall back to DALL-E 2 (square)
+            try:
+                response = oai.images.generate(
+                    model='dall-e-3',
+                    prompt=prompt,
+                    size='1024x1792',
+                    quality='standard',
+                    n=1,
+                )
+            except Exception:
+                response = oai.images.generate(
+                    model='dall-e-2',
+                    prompt=prompt[:999],   # dall-e-2 max 1000 chars
+                    size='1024x1024',
+                    n=1,
+                )
             url = response.data[0].url
             if not url:
                 raise ValueError('No URL returned')
