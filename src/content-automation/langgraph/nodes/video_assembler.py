@@ -424,41 +424,44 @@ def assemble_video_node(state: dict) -> dict:
     for i, scene in enumerate(scenes):
         text = scene.get('text', '').strip()
         duration = float(scene.get('duration', SCENE_DURATION))
-        clip_path  = scene.get('clip_path')    # Pexels video (priority 1)
-        image_path = scene.get('image_path')   # DALL-E image (priority 2)
+        image_path = scene.get('image_path')   # AI character image (PRIORITY 1)
+        clip_path  = scene.get('clip_path')    # Pexels video (fallback)
         out_clip   = str(video_dir / f'scene_{i:02d}.mp4')
 
-        # ── Priority 1: Pexels video clip — PIL caption overlay (preserves motion)
-        if clip_path and Path(clip_path).exists():
-            try:
-                overlay = _make_caption_overlay(text, i, total, accent)
-                if _overlay_on_clip(clip_path, overlay, out_clip, duration, ffmpeg):
-                    scene_clips.append((out_clip, duration))
-                    print(f'[Assembler] Scene {i+1}: ✅ Pexels video + caption overlay')
-                    continue
-            except Exception as e:
-                print(f'[Assembler] Scene {i+1}: Pexels overlay error: {e}')
-
-        # ── Priority 2: AI-generated image (DALL-E) — PIL captions burned in
+        # ── Priority 1: AI character image (Replicate/DALL-E) ─────────────────
+        # This is the main content — the fruit/veggie character for this scene.
+        # Captions are burned directly onto the character image.
         if image_path and Path(image_path).exists():
             try:
                 base = Image.open(image_path).convert('RGB').resize((W, H), Image.LANCZOS)
                 frame = _compose_frame(base, text, i, total, accent)
                 if _image_to_clip(frame, out_clip, duration, ffmpeg):
                     scene_clips.append((out_clip, duration))
-                    print(f'[Assembler] Scene {i+1}: ✅ AI image + PIL captions')
+                    print(f'[Assembler] Scene {i+1}: ✅ AI персонаж + субтитры')
                     continue
             except Exception as e:
                 print(f'[Assembler] Scene {i+1}: AI image error: {e}')
 
-        # ── Priority 3: PIL gradient slide ────────────────────────────────────
+        # ── Priority 2: Pexels video clip — caption overlay ───────────────────
+        # Used when AI image generation failed or no API key available.
+        if clip_path and Path(clip_path).exists():
+            try:
+                overlay = _make_caption_overlay(text, i, total, accent)
+                if _overlay_on_clip(clip_path, overlay, out_clip, duration, ffmpeg):
+                    scene_clips.append((out_clip, duration))
+                    print(f'[Assembler] Scene {i+1}: 📹 Pexels видео + субтитры')
+                    continue
+            except Exception as e:
+                print(f'[Assembler] Scene {i+1}: Pexels overlay error: {e}')
+
+        # ── Priority 3: PIL gradient slide (last resort) ──────────────────────
         base = _make_fallback_slide('', i, total, accent)
         frame = _compose_frame(base, text, i, total, accent)
         if _image_to_clip(frame, out_clip, duration, ffmpeg):
             scene_clips.append((out_clip, duration))
-            print(f'[Assembler] Scene {i+1}: 🖼 gradient slide + PIL captions')
+            print(f'[Assembler] Scene {i+1}: 🖼 градиент + субтитры (нет AI/Pexels)')
         else:
-            print(f'[Assembler] Scene {i+1}: ❌ all methods failed')
+            print(f'[Assembler] Scene {i+1}: ❌ все методы не сработали')
 
     if not scene_clips:
         return {**state, 'error': 'No scene clips rendered'}

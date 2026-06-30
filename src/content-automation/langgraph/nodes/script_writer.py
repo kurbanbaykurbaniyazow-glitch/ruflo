@@ -20,37 +20,37 @@ client = OpenAI()
 CHARACTERS = [
     {
         'name': 'Банан-моряк',
-        'image_base': 'a dramatic red banana character wearing a sailor uniform on a ship deck, photorealistic 3D render, cinematic lighting',
+        'image_base': 'anthropomorphic banana character with a yellow banana head and human body, wearing a white sailor uniform with a captain hat, standing on a ship deck with ocean waves behind, highly detailed 3D cartoon render, Pixar style, expressive face, cinematic lighting',
         'voice': 'эмоциональный, драматичный, говорит с надрывом',
         'emoji': '🍌',
     },
     {
         'name': 'Клубника-подруга',
-        'image_base': 'a strawberry-headed girl character in stylish streetwear Tommy Hilfiger, sitting in a luxury penthouse, photorealistic 3D render',
+        'image_base': 'anthropomorphic strawberry character with a red strawberry head with green leaves on top, human female body wearing stylish Tommy Hilfiger streetwear, standing in a luxury penthouse with city view, highly detailed 3D cartoon render, Pixar style, confident expression',
         'voice': 'дерзкая, уверенная, говорит прямо',
         'emoji': '🍓',
     },
     {
         'name': 'Авокадо-босс',
-        'image_base': 'an avocado-headed businessman in an expensive suit at a corporate office, photorealistic 3D render, dramatic lighting',
+        'image_base': 'anthropomorphic avocado character with a green avocado head, human body in expensive business suit and tie, sitting at executive office desk with city skyline behind, highly detailed 3D cartoon render, Pixar style, serious expression, dramatic office lighting',
         'voice': 'важный, серьёзный, говорит официально',
         'emoji': '🥑',
     },
     {
         'name': 'Помидор-судья',
-        'image_base': 'a tomato-headed judge in court robes banging a gavel in a courtroom, photorealistic 3D render',
+        'image_base': 'anthropomorphic tomato character with a red round tomato head, human body wearing black judge robes, sitting at courtroom bench with gavel, highly detailed 3D cartoon render, Pixar style, stern authoritative expression, dramatic courtroom lighting',
         'voice': 'строгий, официальный, категоричный',
         'emoji': '🍅',
     },
     {
         'name': 'Ананас-король',
-        'image_base': 'a pineapple-headed king in royal robes sitting on a golden throne, photorealistic 3D render, epic lighting',
+        'image_base': 'anthropomorphic pineapple character with a golden pineapple head with crown on top, human body in royal purple velvet robes with golden trim, sitting on magnificent golden throne in palace hall, highly detailed 3D cartoon render, Pixar style, regal majestic expression, epic golden lighting',
         'voice': 'величественный, драматичный, говорит пафосно',
         'emoji': '🍍',
     },
     {
         'name': 'Огурец-детектив',
-        'image_base': 'a cucumber-headed detective in a trench coat under rain in a noir city street, photorealistic 3D render',
+        'image_base': 'anthropomorphic cucumber character with a long green cucumber head, human body wearing brown trench coat and fedora hat, standing in rainy noir city street at night with neon lights reflecting on wet pavement, highly detailed 3D cartoon render, Pixar style, mysterious brooding expression',
         'voice': 'загадочный, спокойный, говорит с расстановкой',
         'emoji': '🥒',
     },
