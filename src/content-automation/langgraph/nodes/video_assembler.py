@@ -88,8 +88,8 @@ def _build_caption_filter(text: str, duration: float, accent_rgb: tuple,
         escaped = _ffmpeg_escape(word.upper())
         enable = f"between(t,{t_start:.3f},{t_end:.3f})"
 
-        # Black stroke (8 directions)
-        for dx, dy in [(-4,0),(4,0),(0,-4),(0,4),(-3,-3),(3,-3),(-3,3),(3,3)]:
+        # Black stroke (4 directions — lighter on CPU)
+        for dx, dy in [(-4,0),(4,0),(0,-4),(0,4)]:
             filters.append(
                 f"drawtext=text='{escaped}'{font_arg}"
                 f":fontsize={font_size}:fontcolor=black"
@@ -270,7 +270,22 @@ def assemble_video_node(state: dict) -> dict:
                 scene_clips.append((out_clip, duration))
                 print(f'[Assembler] Scene {i+1}: ✅ video clip + captions')
                 continue
-            print(f'[Assembler] Scene {i+1}: ffmpeg error, using slide fallback')
+            print(f'[Assembler] Scene {i+1}: ffmpeg error: {r.stderr[-500:]}')
+
+            # Retry without captions (overlay too complex) — still use real clip
+            cmd_nocap = [
+                ffmpeg, '-y', '-i', clip_path,
+                '-vf', f'{overlay},{progress},{brand}',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+                '-pix_fmt', 'yuv420p', '-an', '-t', str(duration),
+                out_clip,
+            ]
+            r2 = subprocess.run(cmd_nocap, capture_output=True, text=True)
+            if r2.returncode == 0:
+                scene_clips.append((out_clip, duration))
+                print(f'[Assembler] Scene {i+1}: ✅ video clip (no captions)')
+                continue
+            print(f'[Assembler] Scene {i+1}: clip failed too: {r2.stderr[-200:]}')
 
         # ── PIL slide fallback with animated captions ────────────────────
         # Clean background slide (no text — text will be overlaid via FFmpeg)
@@ -278,12 +293,11 @@ def assemble_video_node(state: dict) -> dict:
         img_path = str(frames_dir / f'slide_{i:02d}.jpg')
         img.save(img_path, 'JPEG', quality=95)
 
-        # Word-by-word captions overlaid on slide via FFmpeg drawtext
+        # Word-by-word captions overlaid on slide via FFmpeg drawtext (no zoompan — saves RAM)
         captions = _build_caption_filter(text, duration, accent, font_path, font_size=88)
         vf_slide = (
             f'loop=loop={int(duration*30)}:size=1:start=0,'
-            "zoompan=z='min(zoom+0.0003,1.05)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-            f":d={int(duration*30)}:s=1080x1920:fps=30,"
+            'scale=1080:1920:force_original_aspect_ratio=disable,'
             'setsar=1'
         )
         if captions:
