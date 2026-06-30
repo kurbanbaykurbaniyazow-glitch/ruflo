@@ -148,7 +148,6 @@ def _replicate_flux(prompt: str, api_key: str, out_path: Path) -> bool:
     """
     # Create prediction
     body = json.dumps({
-        'version': 'black-forest-labs/flux-schnell',
         'input': {
             'prompt': prompt,
             'aspect_ratio': '9:16',
