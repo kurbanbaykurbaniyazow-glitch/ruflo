@@ -155,17 +155,17 @@ def _draw_stroked(draw, pos, text, font, fill, stroke=8):
 def _make_fallback_slide(text: str, scene_idx: int, total: int,
                           accent: tuple) -> Image.Image:
     """Gradient slide fallback when no AI image available."""
-    # Dark-to-accent vibrant gradient (not near-black)
-    bg_top = (20, 10, 40)
-    img = Image.new('RGB', (W, H), bg_top)
+    # Vibrant top-to-bottom gradient: deep purple → accent
+    top = (40, 0, 80)
+    bot = (max(accent[0], 80), max(accent[1], 0), max(accent[2], 80))
+    img = Image.new('RGB', (W, H), top)
     d = ImageDraw.Draw(img)
 
-    # gradient from dark purple to accent colour
     for y in range(H):
         t = y / H
-        r = int(bg_top[0] + t * max(accent[0] - bg_top[0], 0) * 0.6)
-        g = int(bg_top[1] + t * max(accent[1] - bg_top[1], 0) * 0.6)
-        b = int(bg_top[2] + t * max(accent[2] - bg_top[2], 0) * 0.5)
+        r = int(top[0] + t * (bot[0] - top[0]))
+        g = int(top[1] + t * (bot[1] - top[1]))
+        b = int(top[2] + t * (bot[2] - top[2]))
         d.line([(0, y), (W, y)], fill=(r, g, b))
 
     # Progress bar
@@ -223,13 +223,14 @@ def _compose_frame(base_img: Image.Image, text: str, scene_idx: int,
     img = base_img.copy().convert('RGB')
     d = ImageDraw.Draw(img)
 
-    # Semi-transparent dark gradient at bottom for text readability
-    for y in range(H // 2, H):
-        alpha = min(int((y - H // 2) / (H // 2) * 180), 180)
+    # Subtle dark strip only at very bottom (for text readability, not whole image)
+    strip_top = int(H * 0.62)
+    for y in range(strip_top, H):
+        alpha = min(int((y - strip_top) / (H - strip_top) * 140), 140)
         r2, g2, b2 = img.getpixel((W // 2, y))[:3]
-        r2 = max(r2 - alpha // 2, 0)
-        g2 = max(g2 - alpha // 2, 0)
-        b2 = max(b2 - alpha // 2, 0)
+        r2 = max(r2 - alpha, 0)
+        g2 = max(g2 - alpha, 0)
+        b2 = max(b2 - alpha, 0)
         d.line([(0, y), (W, y)], fill=(r2, g2, b2))
 
     # Progress bar at top
