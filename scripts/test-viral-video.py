@@ -7,6 +7,12 @@
 Pexels видео используется только если AI-генерация недоступна.
 """
 import sys, os, uuid
+
+if '--run' not in sys.argv:
+    print('⛔  Пайплайн отключён — идёт доработка.')
+    print('   Когда будешь готов запустить: python3 scripts/test-viral-video.py --run')
+    sys.exit(0)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'content-automation', 'langgraph'))
 
 # Загружаем .env
