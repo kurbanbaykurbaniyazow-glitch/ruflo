@@ -11,7 +11,21 @@ import random
 import re
 from openai import OpenAI
 
-client = OpenAI()
+_openrouter_key = os.environ.get('OPENROUTER_API_KEY', '')
+_openai_key = os.environ.get('OPENAI_API_KEY', '')
+_script_model = os.environ.get('SCRIPT_MODEL', 'anthropic/claude-sonnet-4-5')
+
+if _openrouter_key:
+    client = OpenAI(
+        api_key=_openrouter_key,
+        base_url='https://openrouter.ai/api/v1',
+    )
+    SCRIPT_MODEL = _script_model
+    print(f'[ScriptWriter] 🚀 OpenRouter: {SCRIPT_MODEL}')
+else:
+    client = OpenAI(api_key=_openai_key)
+    SCRIPT_MODEL = 'gpt-4o-mini'
+    print('[ScriptWriter] ⚠️  OpenRouter key not found, falling back to GPT-4o-mini')
 
 # ── Character roster ──────────────────────────────────────────────────────────
 
@@ -272,7 +286,7 @@ def _generate_concepts(character: dict) -> list[dict]:
 }}"""
 
     response = client.chat.completions.create(
-        model='gpt-4o-mini',
+        model=SCRIPT_MODEL,
         max_tokens=2000,
         temperature=0.9,
         messages=[{'role': 'user', 'content': prompt}],
@@ -321,7 +335,7 @@ def _pick_best_concept(concepts: list[dict], character: dict) -> dict:
 }}"""
 
     response = client.chat.completions.create(
-        model='gpt-4o-mini',
+        model=SCRIPT_MODEL,
         max_tokens=1000,
         temperature=0.3,
         messages=[{'role': 'user', 'content': prompt}],
@@ -410,7 +424,7 @@ def _generate_full_script(character: dict, concept: dict, cta: str) -> tuple[str
 }}"""
 
     response = client.chat.completions.create(
-        model='gpt-4o-mini',
+        model=SCRIPT_MODEL,
         max_tokens=4000,
         temperature=0.8,
         messages=[{'role': 'user', 'content': prompt}],
