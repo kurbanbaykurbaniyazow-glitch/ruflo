@@ -239,34 +239,31 @@ def _dalle_generate(oai: OpenAI, prompt: str) -> str | None:
 
 def generate_images_node(state: dict) -> dict:
     """
-    LangGraph node: generate one portrait image per scene.
+    LangGraph node: generate AI character image per scene.
 
-    Priority per scene:
-      1. Replicate Flux Schnell (requires REPLICATE_API_KEY) — best for fruit characters
-      2. DALL-E 3 (requires OPENAI_API_KEY with image access)
-      3. DALL-E 2 (fallback)
-      4. PIL gradient slide (always works)
+    Only tries real AI generation (Replicate / DALL-E).
+    If both fail → image_path stays None so fetch_videos_node
+    can download a Pexels VIDEO clip for that scene instead.
+    Gradient/photo fallbacks are intentionally removed here —
+    the assembler handles the last-resort gradient internally.
     """
     scenes: list[dict] = state.get('scenes', [])
     content_id: str = state.get('content_id', 'default')
     character: dict = state.get('character', {})
     openai_key = os.environ.get('OPENAI_API_KEY', '')
-    pexels_key = os.environ.get('PEXELS_API_KEY', '')
 
     images_dir = OUTPUT_DIR / content_id / 'images'
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    accent = ACCENT_COLORS[hash(content_id) % len(ACCENT_COLORS)]
     oai = OpenAI(api_key=openai_key) if openai_key else None
-
     updated_scenes = []
 
     for i, scene in enumerate(scenes):
         out_path = images_dir / f'scene_{i:02d}.jpg'
 
-        # Use cached image if it looks real (>10 KB)
+        # Use cached AI image if it looks real (>10 KB)
         if out_path.exists() and out_path.stat().st_size > 10_000:
-            print(f'[ImageGen] Scene {i+1}: ♻️  cached')
+            print(f'[ImageGen] Scene {i+1}: ♻️  cached AI image')
             updated_scenes.append({**scene, 'image_path': str(out_path)})
             continue
 
@@ -283,21 +280,21 @@ def generate_images_node(state: dict) -> dict:
 
         # ── 1. Replicate Flux Schnell — best for fruit/veggie characters ──────
         if replicate_key:
-            print(f'[ImageGen] Scene {i+1}: 🍌 Replicate Flux Schnell generating...')
+            print(f'[ImageGen] Scene {i+1}: 🍌 Replicate Flux Schnell...')
             raw_path = images_dir / f'scene_{i:02d}_flux.jpg'
             if _replicate_flux(image_prompt[:1500], replicate_key, raw_path):
                 try:
                     img = Image.open(str(raw_path)).convert('RGB').resize((W, H), Image.LANCZOS)
                     img.save(str(out_path), 'JPEG', quality=92)
                     raw_path.unlink(missing_ok=True)
-                    print(f'[ImageGen] Scene {i+1}: ✅ Replicate Flux → {out_path.name}')
+                    print(f'[ImageGen] Scene {i+1}: ✅ Replicate → {out_path.name}')
                     saved = True
                 except Exception as e:
                     print(f'[ImageGen] Scene {i+1}: Replicate save error: {e}')
 
         # ── 2. DALL-E 3 / 2 ──────────────────────────────────────────────────
         if not saved and oai:
-            print(f'[ImageGen] Scene {i+1}: DALL-E generating...')
+            print(f'[ImageGen] Scene {i+1}: 🎨 DALL-E generating...')
             url = _dalle_generate(oai, image_prompt[:3900])
             if url:
                 try:
@@ -309,33 +306,15 @@ def generate_images_node(state: dict) -> dict:
                     print(f'[ImageGen] Scene {i+1}: ✅ DALL-E → {out_path.name}')
                     saved = True
                 except Exception as e:
-                    print(f'[ImageGen] Scene {i+1}: DALL-E download/save error: {e}')
-        elif not saved:
-            print(f'[ImageGen] Scene {i+1}: ⚠️  no REPLICATE_API_KEY or OPENAI_API_KEY')
+                    print(f'[ImageGen] Scene {i+1}: DALL-E save error: {e}')
 
-        # ── 3. Pexels Photos ──────────────────────────────────────────────────
-        if not saved and pexels_key:
-            query = _pexels_search_query(image_prompt)
-            print(f'[ImageGen] Scene {i+1}: 📷 Pexels Photos "{query}"')
-            raw_path = images_dir / f'scene_{i:02d}_pexels.jpg'
-            if _fetch_pexels_photo(query, raw_path, pexels_key):
-                try:
-                    img = Image.open(str(raw_path)).convert('RGB').resize((W, H), Image.LANCZOS)
-                    img.save(str(out_path), 'JPEG', quality=92)
-                    raw_path.unlink(missing_ok=True)
-                    print(f'[ImageGen] Scene {i+1}: ✅ Pexels photo → {out_path.name}')
-                    saved = True
-                except Exception as e:
-                    print(f'[ImageGen] Scene {i+1}: Pexels photo error: {e}')
-        elif not saved:
-            print(f'[ImageGen] Scene {i+1}: ⚠️  no PEXELS_API_KEY')
-
-        # ── 3. Gradient slide (last resort) ───────────────────────────────────
         if not saved:
-            print(f'[ImageGen] Scene {i+1}: 🖼 gradient slide (no APIs available)')
-            img = _make_gradient_slide(i, accent)
-            img.save(str(out_path), 'JPEG', quality=90)
+            # No AI image — fetch_videos_node will get a video clip instead
+            print(f'[ImageGen] Scene {i+1}: ⚠️  AI generation failed → video clip fallback')
+            updated_scenes.append({**scene, 'image_path': None})
+        else:
+            updated_scenes.append({**scene, 'image_path': str(out_path)})
 
-        updated_scenes.append({**scene, 'image_path': str(out_path)})
-
+    ai_count = sum(1 for s in updated_scenes if s.get('image_path'))
+    print(f'[ImageGen] AI персонажей: {ai_count}/{len(scenes)} — остальные получат видеоклипы')
     return {**state, 'scenes': updated_scenes}

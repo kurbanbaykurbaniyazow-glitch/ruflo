@@ -79,15 +79,19 @@ else:
     print('  ⚠️  Нет AI ключей — будет градиентный фон')
 state = generate_images_node(state)
 imgs_ok = sum(1 for s in state['scenes'] if s.get('image_path'))
-print(f'  {"✅" if imgs_ok == len(state["scenes"]) else "⚠️"}  Персонажей: {imgs_ok}/{len(state["scenes"])}')
-
-# ── Шаг 3: Pexels видео (запасной — только если нет AI картинок) ─────────────
 scenes_without_img = sum(1 for s in state['scenes'] if not s.get('image_path'))
+print(f'  ✅  AI персонажей: {imgs_ok}/{len(state["scenes"])}')
+if scenes_without_img:
+    print(f'  🎬  Сцен без AI: {scenes_without_img} → получат видеоклипы Pexels')
+
+# ── Шаг 3: Pexels видеоклипы для сцен без AI-изображения ────────────────────
 if scenes_without_img > 0 and has_pexels:
-    print(f'\n[3/6] 🎬 Pexels для {scenes_without_img} сцен без AI картинки...')
+    print(f'\n[3/6] 🎬 Pexels видеоклипы для {scenes_without_img} сцен...')
     state = fetch_videos_node(state)
     clips_ok = sum(1 for s in state['scenes'] if s.get('clip_path'))
-    print(f'  {"✅" if clips_ok else "⚠️"}  Клипов: {clips_ok}/{len(state["scenes"])}')
+    print(f'  {"✅" if clips_ok else "⚠️"}  Видеоклипов: {clips_ok}/{scenes_without_img}')
+elif scenes_without_img > 0:
+    print('\n[3/6] ⚠️  Нет PEXELS_API_KEY — сцены без AI получат градиент')
 else:
     print('\n[3/6] 🎬 Все сцены имеют AI персонажей — Pexels не нужен')
 
