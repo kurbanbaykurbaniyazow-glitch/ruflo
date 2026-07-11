@@ -106,11 +106,11 @@ THEMES = [
 ]
 
 CTA_VARIANTS = [
-    'Если эта история тебя задела — напиши в комментарии своё имя. Ты не один. И подпишись — я выпускаю новые истории каждый день.',
-    'У тебя была похожая ситуация? Напиши в комментарии. Это важно — знать что ты не один. Подпишись чтобы не пропустить продолжение.',
-    'Эта история реальная. Если она тебя тронула — поставь лайк и подпишись. Завтра будет следующая часть.',
-    'Ты дочитал до конца — значит это тебя задело. Напиши в комментарии что ты думаешь. Подпишись — таких историй будет ещё много.',
-    'Если в твоей жизни было что-то похожее — ты сильнее чем думаешь. Подпишись и напиши свою историю в комментариях.',
+    'Подпишись на канал — завтра выйдет следующая история. Пиши в комментарии: ты узнал себя в этой истории?',
+    'Нажми подписаться чтобы не пропустить следующее видео. Каждый день — новая история. Напиши в комментарии свою.',
+    'Подпишись прямо сейчас — следующая история выйдет завтра и она ещё сильнее. Напиши в комментарии что ты думаешь.',
+    'Если эта история тебя задела — подпишись на канал. Новые истории каждый день. Напиши в комментарии была ли у тебя похожая ситуация.',
+    'Подписывайся чтобы не пропустить продолжение. Завтра расскажу что случилось дальше. Напиши в комментарии — ты бы так поступил?',
 ]
 
 
@@ -236,103 +236,234 @@ def _scene_pexels_query(character: dict, scene_idx: int, total: int) -> str:
     return f'{setting} {mood}'
 
 
-# ── Main generator ────────────────────────────────────────────────────────────
+# ── Stage 1: Generate 5 concepts ─────────────────────────────────────────────
 
-def generate_story_node(state: dict) -> dict:
+def _generate_concepts(character: dict) -> list[dict]:
     """
-    LangGraph node: generate a deep 2-minute story with character.
-    20 scenes × ~6 seconds = ~2 minutes total.
+    Ask GPT to create 5 different story concepts for this character.
+    Returns list of dicts with: theme, hook, moral, emotional_angle, viral_reason.
     """
-    character = random.choice(CHARACTERS)
-    theme_data = random.choice(THEMES)
-    theme = theme_data['theme']
-    hook = theme_data['hook']
-    moral = theme_data['moral']
-    cta = random.choice(CTA_VARIANTS)
+    prompt = f"""Ты — опытный сценарист вирального контента для YouTube Shorts и TikTok.
 
-    prompt = f"""Ты — сценарист глубокого эмоционального контента для коротких видео (формат YouTube Shorts / TikTok).
+ПЕРСОНАЖ: {character['name']}
+ГОЛОС: {character['voice']}
+ПРЕДЫСТОРИЯ: {character['backstory']}
+
+Придумай 5 РАЗНЫХ концептов историй для этого персонажа. Каждый концепт должен быть:
+- Эмоционально сильным (слёзы, смех, узнавание себя)
+- Универсально понятным (любой зритель скажет "это про меня")
+- С неожиданным поворотом или откровением
+- Разным по жанру: трагедия, триумф, предательство, любовь, перерождение
+
+ВЕРНИ ТОЛЬКО JSON:
+{{
+  "concepts": [
+    {{
+      "id": 1,
+      "theme": "тема в одной фразе",
+      "hook": "первая фраза которая зацепит зрителя (вопрос или шокирующий факт, до 20 слов)",
+      "moral": "главный урок истории (одно предложение)",
+      "emotional_angle": "главная эмоция: предательство/триумф/потеря/любовь/перерождение",
+      "viral_score": 0,
+      "viral_reason": "почему именно эта история наберёт просмотры"
+    }},
+    ... (ещё 4 концепта)
+  ]
+}}"""
+
+    response = client.chat.completions.create(
+        model='gpt-4o-mini',
+        max_tokens=2000,
+        temperature=0.9,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    raw = response.choices[0].message.content if response.choices else ''
+    match = re.search(r'\{[\s\S]*\}', raw)
+    if not match:
+        return []
+    try:
+        data = json.loads(match.group())
+        return data.get('concepts', [])
+    except json.JSONDecodeError:
+        return []
+
+
+def _pick_best_concept(concepts: list[dict], character: dict) -> dict:
+    """
+    Ask GPT to score all 5 concepts and return the winner.
+    Criteria: emotional impact, universal relatability, viral potential, narrative strength.
+    """
+    concepts_text = '\n'.join(
+        f"Концепт {c['id']}: {c['theme']}\n  Хук: {c['hook']}\n  Эмоция: {c['emotional_angle']}\n  Почему вирусный: {c['viral_reason']}"
+        for c in concepts
+    )
+
+    prompt = f"""Ты — редактор вирального контента с 10-летним опытом в YouTube Shorts.
+
+ПЕРСОНАЖ: {character['name']} ({character['voice']})
+
+Оцени эти 5 концептов историй по шкале 1-10 по критериям:
+- Эмоциональный удар (насколько зритель почувствует что-то сильное)
+- Универсальность (насколько многие узнают себя)
+- Вирусный потенциал (насколько захотят поделиться)
+- Сила нарратива (насколько история держит до конца)
+
+{concepts_text}
+
+ВЕРНИ ТОЛЬКО JSON:
+{{
+  "scores": [
+    {{"id": 1, "emotional": 8, "universal": 7, "viral": 9, "narrative": 8, "total": 32, "verdict": "почему выбрал или не выбрал"}},
+    ... (для всех 5)
+  ],
+  "winner_id": 3,
+  "winner_reason": "почему именно этот концепт лучший"
+}}"""
+
+    response = client.chat.completions.create(
+        model='gpt-4o-mini',
+        max_tokens=1000,
+        temperature=0.3,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    raw = response.choices[0].message.content if response.choices else ''
+    match = re.search(r'\{[\s\S]*\}', raw)
+    if not match:
+        return concepts[0]
+    try:
+        data = json.loads(match.group())
+        winner_id = data.get('winner_id', 1)
+        winner = next((c for c in concepts if c['id'] == winner_id), concepts[0])
+        print(f'[ScriptWriter] 🏆 Победитель: концепт #{winner_id} — {data.get("winner_reason", "")}')
+        scores = {s['id']: s['total'] for s in data.get('scores', [])}
+        for c in concepts:
+            mark = '🏆' if c['id'] == winner_id else '  '
+            print(f'  {mark} [{c["id"]}] {c["theme"][:55]} — {scores.get(c["id"], "?")} баллов')
+        return winner
+    except (json.JSONDecodeError, StopIteration):
+        return concepts[0]
+
+
+# ── Stage 3: Generate full script for winner ──────────────────────────────────
+
+def _generate_full_script(character: dict, concept: dict, cta: str) -> tuple[str, list[dict]]:
+    """Generate 20-scene script for the winning concept. Returns (title, scenes)."""
+    prompt = f"""Ты — сценарист глубокого эмоционального контента для YouTube Shorts / TikTok.
 
 ПЕРСОНАЖ: {character['name']}
 ХАРАКТЕР: {character['voice']}
 ПРЕДЫСТОРИЯ ПЕРСОНАЖА: {character['backstory']}
-ТЕМА: {theme}
-ОТКРЫВАЮЩИЙ ХУКИ: {hook}
-МОРАЛЬ ИСТОРИИ: {moral}
-ПРИЗЫВ К ДЕЙСТВИЮ: {cta}
 
-ЗАДАЧА: Напиши историю из РОВНО 20 сцен. Это полноценная 2-минутная история которая захватит зрителя с первой секунды и не отпустит до конца.
+ВЫБРАННЫЙ КОНЦЕПТ:
+- Тема: {concept['theme']}
+- Хук (сцена 1): {concept['hook']}
+- Мораль (сцена 19): {concept['moral']}
+- Эмоциональный угол: {concept.get('emotional_angle', '')}
 
-СТРУКТУРА (строго соблюдай):
-- Сцена 1 (ХУК): Используй точный текст хука выше — шокирующий вопрос или факт
-- Сцены 2-3 (ЗНАКОМСТВО): Кто я, моя ситуация до событий, чем жил
-- Сцены 4-6 (ПРЕДЫСТОРИЯ): Как всё началось, лучший период, что было поставлено на карту
-- Сцены 7-9 (НАРАСТАНИЕ): Первые тревожные знаки, что-то пошло не так
-- Сцены 10-12 (КОНФЛИКТ/КРИЗИС): Самый тяжёлый момент, удар, самое дно
-- Сцены 13-15 (ПОВОРОТ): Что изменило всё, решение, первый шаг вперёд
-- Сцены 16-18 (РАЗВЯЗКА): Чем закончилось, что изменилось во мне
-- Сцена 19 (МОРАЛЬ): Главный урок — используй текст морали выше
-- Сцена 20 (CTA): Обращение к зрителю — используй текст CTA выше
+ПРИЗЫВ К ДЕЙСТВИЮ (сцена 20): {cta}
 
-ПРАВИЛА НАПИСАНИЯ:
-- Пиши от ПЕРВОГО ЛИЦА (персонаж рассказывает сам о себе)
-- Каждая сцена: 25-40 слов (это ~6 секунд речи)
-- Разговорный живой язык — как будто друг рассказывает за чашкой чая
-- Эмоционально, честно, без пафоса
-- Каждая сцена должна либо раскрывать что-то новое либо усиливать эмоцию
-- Сцены 10-12 должны быть самыми драматичными — читатель должен почувствовать боль
-- Сцены 16-19 должны давать надежду и смысл
-- НЕ используй оскорблений, мата, расизма, дискриминации
+ЗАДАЧА: Напиши историю из РОВНО 20 сцен (~2 минуты видео). Захвати зрителя с первой секунды и не отпускай до конца.
 
-ВЕРНИ ТОЛЬКО JSON без пояснений:
+СТРУКТУРА (строго):
+- Сцена 1 (ХУК): используй хук из концепта дословно
+- Сцены 2-3 (ЗНАКОМСТВО): кто я, моя жизнь до событий
+- Сцены 4-6 (ПРЕДЫСТОРИЯ): как всё началось, что было поставлено на карту
+- Сцены 7-9 (НАРАСТАНИЕ): тревожные знаки, что-то пошло не так
+- Сцены 10-12 (КРИЗИС): самое тяжёлое — удар, предательство, самое дно
+- Сцены 13-15 (ПОВОРОТ): что изменило всё, первый шаг вперёд
+- Сцены 16-18 (РАЗВЯЗКА): чем закончилось, что изменилось во мне
+- Сцена 19 (МОРАЛЬ): главный урок из концепта
+- Сцена 20 (CTA): используй точный текст CTA — персонаж просит подписаться
+
+ПРАВИЛА:
+- Первое лицо, разговорный язык
+- 25-40 слов на сцену (~6 секунд)
+- Сцены 10-12: максимальная боль и эмоция
+- Сцена 20: ВСЕГДА заканчивается просьбой подписаться на канал
+- Без мата, оскорблений, дискриминации
+
+ВЕРНИ ТОЛЬКО JSON:
 {{
-  "title": "цепляющий заголовок истории (до 8 слов)",
-  "character": "{character['name']}",
+  "title": "цепляющий заголовок до 8 слов",
   "scenes": [
-    {{"index": 0, "text": "текст сцены 1 (хук)", "duration": 6}},
-    {{"index": 1, "text": "текст сцены 2", "duration": 6}},
-    {{"index": 2, "text": "текст сцены 3", "duration": 6}},
-    {{"index": 3, "text": "текст сцены 4", "duration": 6}},
-    {{"index": 4, "text": "текст сцены 5", "duration": 6}},
-    {{"index": 5, "text": "текст сцены 6", "duration": 6}},
-    {{"index": 6, "text": "текст сцены 7", "duration": 6}},
-    {{"index": 7, "text": "текст сцены 8", "duration": 6}},
-    {{"index": 8, "text": "текст сцены 9", "duration": 6}},
-    {{"index": 9, "text": "текст сцены 10", "duration": 7}},
-    {{"index": 10, "text": "текст сцены 11", "duration": 7}},
-    {{"index": 11, "text": "текст сцены 12", "duration": 7}},
-    {{"index": 12, "text": "текст сцены 13", "duration": 6}},
-    {{"index": 13, "text": "текст сцены 14", "duration": 6}},
-    {{"index": 14, "text": "текст сцены 15", "duration": 6}},
-    {{"index": 15, "text": "текст сцены 16", "duration": 6}},
-    {{"index": 16, "text": "текст сцены 17", "duration": 6}},
-    {{"index": 17, "text": "текст сцены 18", "duration": 6}},
-    {{"index": 18, "text": "текст сцены 19 (мораль)", "duration": 7}},
-    {{"index": 19, "text": "текст сцены 20 (CTA)", "duration": 7}}
+    {{"index": 0, "text": "...", "duration": 6}},
+    {{"index": 1, "text": "...", "duration": 6}},
+    {{"index": 2, "text": "...", "duration": 6}},
+    {{"index": 3, "text": "...", "duration": 6}},
+    {{"index": 4, "text": "...", "duration": 6}},
+    {{"index": 5, "text": "...", "duration": 6}},
+    {{"index": 6, "text": "...", "duration": 6}},
+    {{"index": 7, "text": "...", "duration": 6}},
+    {{"index": 8, "text": "...", "duration": 6}},
+    {{"index": 9, "text": "...", "duration": 7}},
+    {{"index": 10, "text": "...", "duration": 7}},
+    {{"index": 11, "text": "...", "duration": 7}},
+    {{"index": 12, "text": "...", "duration": 6}},
+    {{"index": 13, "text": "...", "duration": 6}},
+    {{"index": 14, "text": "...", "duration": 6}},
+    {{"index": 15, "text": "...", "duration": 6}},
+    {{"index": 16, "text": "...", "duration": 6}},
+    {{"index": 17, "text": "...", "duration": 6}},
+    {{"index": 18, "text": "...", "duration": 7}},
+    {{"index": 19, "text": "...", "duration": 7}}
   ]
 }}"""
-
-    print(f'[ScriptWriter] {character["emoji"]} {character["name"]} | Тема: {theme}')
 
     response = client.chat.completions.create(
         model='gpt-4o-mini',
         max_tokens=4000,
-        temperature=0.85,
+        temperature=0.8,
         messages=[{'role': 'user', 'content': prompt}],
     )
-
     raw = response.choices[0].message.content if response.choices else ''
-    json_match = re.search(r'\{[\s\S]*\}', raw)
-
-    if not json_match:
-        return {**state, 'scenes': [], 'error': f'Script parse failed: {raw[:200]}'}
-
+    match = re.search(r'\{[\s\S]*\}', raw)
+    if not match:
+        return concept['theme'], []
     try:
-        data = json.loads(json_match.group())
-    except json.JSONDecodeError as e:
-        return {**state, 'scenes': [], 'error': f'JSON decode error: {e}'}
+        data = json.loads(match.group())
+        return data.get('title', concept['theme']), data.get('scenes', [])
+    except json.JSONDecodeError:
+        return concept['theme'], []
 
-    scenes = data.get('scenes', [])
-    title = data.get('title', theme)
+
+# ── Main generator ────────────────────────────────────────────────────────────
+
+def generate_story_node(state: dict) -> dict:
+    """
+    LangGraph node: 3-stage script generation.
+    Stage 1: Generate 5 concepts → Stage 2: Pick best → Stage 3: Full 20-scene script.
+    """
+    character = random.choice(CHARACTERS)
+    cta = random.choice(CTA_VARIANTS)
+
+    print(f'[ScriptWriter] {character["emoji"]} {character["name"]}')
+
+    # ── Stage 1: 5 concepts ───────────────────────────────────────────────────
+    print('[ScriptWriter] 💡 Этап 1/3: Генерирую 5 концептов...')
+    concepts = _generate_concepts(character)
+    if not concepts:
+        # Fallback to random theme if concept generation fails
+        theme_data = random.choice(THEMES)
+        concepts = [{'id': 1, 'theme': theme_data['theme'], 'hook': theme_data['hook'],
+                     'moral': theme_data['moral'], 'emotional_angle': 'драма', 'viral_reason': ''}]
+
+    print(f'[ScriptWriter] 📋 Получено концептов: {len(concepts)}')
+    for c in concepts:
+        print(f'  [{c["id"]}] {c["theme"][:65]}')
+
+    # ── Stage 2: Score & pick best ────────────────────────────────────────────
+    print('[ScriptWriter] ⚖️  Этап 2/3: Выбираю лучший концепт...')
+    best = _pick_best_concept(concepts, character) if len(concepts) > 1 else concepts[0]
+
+    theme = best['theme']
+    print(f'[ScriptWriter] ✅ Выбрана тема: "{theme}"')
+
+    # ── Stage 3: Full script ──────────────────────────────────────────────────
+    print('[ScriptWriter] ✍️  Этап 3/3: Пишу полный сценарий...')
+    title, scenes = _generate_full_script(character, best, cta)
+
+    if not scenes:
+        return {**state, 'scenes': [], 'error': 'Full script generation failed'}
 
     total_sec = sum(s.get('duration', 6) for s in scenes)
 
@@ -341,7 +472,7 @@ def generate_story_node(state: dict) -> dict:
         s['pexels_query'] = _scene_pexels_query(character, s['index'], len(scenes))
         s['character'] = character['name']
 
-    print(f'[ScriptWriter] ✅ "{title}" — {len(scenes)} сцен, ~{total_sec}с ({total_sec//60}м{total_sec%60}с)')
+    print(f'[ScriptWriter] 🎬 "{title}" — {len(scenes)} сцен, ~{total_sec}с ({total_sec//60}м{total_sec%60}с)')
     for s in scenes:
         print(f'  [{s["index"]+1:02d}] {s["text"][:70]}')
 
